@@ -1,0 +1,67 @@
+{
+  "summary": "First-finish smoke testing of KisanBaazar backend (FastAPI) and frontend (React). Most backend endpoints work; two backend bugs found (register 500, AI price-predict 500). Frontend home/login/farmer dashboard/product create/buyer login work; AI chat floating button is blocked by Emergent badge overlay.",
+  "tested_scope": ["backend", "frontend", "auth", "integration"],
+  "passed": [
+    "GET /api/products returns 12 seeded products",
+    "GET /api/categories returns 17 categories",
+    "POST /api/auth/login works for farmer/buyer (token+user returned)",
+    "GET /api/auth/me returns authenticated user with correct role",
+    "POST /api/products as farmer creates product (200); as buyer denied (403 'Only farmers can list products')",
+    "GET /api/products supports filters category/q/organic/export_ready/auction (all 200 with correct counts)",
+    "GET /api/products/{pid} returns single product",
+    "POST /api/orders creates order with mock razorpay_order_id (order_mock_*)",
+    "POST /api/orders/{oid}/pay returns ok+payment_id and marks paid",
+    "GET /api/orders returns buyer's orders",
+    "GET /api/dashboard/stats returns role-based stats (farmer)",
+    "POST /api/wishlist/{pid} + GET /api/wishlist work",
+    "POST /api/ai/chat streams real Claude response (welcome text + agriculture content)",
+    "POST /api/products/{pid}/bid updates current_bid on auction product",
+    "Frontend home page renders hero, search, CTA, badges",
+    "Frontend farmer login (data-testid login-email/password/submit) redirects to /dashboard/farmer",
+    "Frontend Add Product dialog opens and form submission completes (form-title/desc/price/location/state/submit)",
+    "Frontend buyer login redirects to /dashboard/buyer"
+  ],
+  "failed": [
+    {
+      "area": "backend /api/auth/register",
+      "issue": "Returns HTTP 500. FastAPI serialization fails: 'ObjectId is not iterable'. Mongo driver mutates the `doc` dict to add `_id` after insert_one, and the response includes it. Fix: in server.py register(), build the returned user dict excluding `_id` (or pop `_id`/`password` before returning).",
+      "evidence": "POST /api/auth/register -> 500. backend.err.log: ValueError: [TypeError(\"'ObjectId' object is not iterable\"), TypeError('vars() argument must have __dict__ attribute')] at server.py line 235.",
+      "priority": "HIGH"
+    },
+    {
+      "area": "backend /api/ai/price-predict",
+      "issue": "Returns HTTP 500. emergentintegrations ChatError: 'Budget has been exceeded! Current cost: 0.0, Max budget: 0.0' from litellm. /api/ai/chat works fine on same key, so the issue is intermittent/model-specific or per-route. Worth retrying; may be transient provider budget glitch.",
+      "evidence": "POST /api/ai/price-predict {\"message\":\"...\"} -> 500 'Internal Server Error'. backend.err.log shows ChatError from stream_message.",
+      "priority": "MEDIUM"
+    },
+    {
+      "area": "frontend AI chat floating button",
+      "issue": "[data-testid=\"ai-chat-open\"] is overlapped by the 'Made with Emergent' badge (#emergent-badge) at bottom-right. Playwright reports: 'emergent-badge intercepts pointer events'. Real users on small viewports may also struggle. Move the AI chat button to bottom-left or add bottom offset above the badge.",
+      "evidence": "Playwright click on data-testid=ai-chat-open timed out; element resolved but #emergent-badge intercepted pointer events for 14 retries.",
+      "priority": "MEDIUM"
+    },
+    {
+      "area": "frontend buyer checkout flow",
+      "issue": "After clicking [data-testid=place-order-btn] the URL remained /checkout (no redirect to confirmation). Backend POST /api/orders works via curl, so possibly cart state empty (localStorage cleared earlier in same test) or missing redirect after place-order. Needs manual retry to confirm.",
+      "evidence": "Test logged 'place order url: https://.../checkout' after click. No redirect within 4s.",
+      "priority": "MEDIUM"
+    },
+    {
+      "area": "frontend console",
+      "issue": "Multiple 401 responses on unauthenticated pages (likely /api/auth/me being called without token). Cosmetic noise but should be guarded.",
+      "evidence": "Console: 'Failed to load resource: the server responded with a status of 401 ()'.",
+      "priority": "LOW"
+    }
+  ],
+  "action_items": [
+    "Fix /api/auth/register to strip _id from the response dict before returning (server.py ~line 233-235): return {'token': token, 'user': {k:v for k,v in doc.items() if k not in ('password','_id')}}.",
+    "Investigate /api/ai/price-predict 'Budget exceeded' error — retry, or align model/route with the working /api/ai/chat path; consider try/except returning fallback prediction string instead of 500.",
+    "Reposition AI chat floating button so it does not overlap the Made-with-Emergent badge (e.g., bottom-24 right-6, or bottom-left). Confirm clickability in viewport widths > 1024px.",
+    "Verify buyer checkout flow end-to-end manually: ensure cart persists, place-order redirects to /orders/{id} or success page.",
+    "Suppress 401 console noise by skipping /api/auth/me call when no token is present."
+  ],
+  "success_rate": {"backend": "85%", "frontend": "75%"},
+  "retest_needed": true,
+  "full_testing_deferred": true,
+  "test_credentials": "Loaded from /app/memory/test_credentials.md; farmer/buyer login verified, admin not exercised."
+}
