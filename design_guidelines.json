@@ -1,0 +1,136 @@
+{
+  "theme": "Light & Dark Mode",
+  "archetype": "Archetype 1: Organic & Earthy",
+  "design_philosophy": "Modern Minimal Professional UI tailored for Senior Citizen Accessibility. Focuses on nature-inspired organic colors, high-contrast typography, large touch targets, and frictionless navigation. Eliminates cognitive overload with soft shadows, rounded cards, and smooth, meaningful animations.",
+  "colors": {
+    "light": {
+      "primary": "#2D6A4F",
+      "primary_hover": "#1B4332",
+      "secondary": "#D8F3DC",
+      "background": "#F9FAFB",
+      "surface": "#FFFFFF",
+      "text_primary": "#0A0A0A",
+      "text_secondary": "#4B5563",
+      "border": "#E5E7EB",
+      "accent_organic": "#74C69D",
+      "success": "#10B981",
+      "warning": "#F59E0B",
+      "error": "#EF4444"
+    },
+    "dark": {
+      "primary": "#4ADE80",
+      "primary_hover": "#22C55E",
+      "secondary": "#064E3B",
+      "background": "#0F172A",
+      "surface": "#1E293B",
+      "text_primary": "#F8FAFC",
+      "text_secondary": "#94A3B8",
+      "border": "#334155",
+      "accent_organic": "#34D399",
+      "success": "#10B981",
+      "warning": "#FBBF24",
+      "error": "#F87171"
+    }
+  },
+  "typography": {
+    "heading_font": "Outfit",
+    "body_font": "Work Sans",
+    "scales": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tight font-bold",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight font-semibold",
+      "h3": "text-xl sm:text-2xl font-semibold",
+      "body_large": "text-lg sm:text-xl",
+      "body": "text-base",
+      "small": "text-sm"
+    },
+    "rules": [
+      "No generic sans (Inter/Roboto) for headings.",
+      "Use minimum 18px equivalent for critical body text to ensure senior citizen readability.",
+      "Ensure 4.5:1 contrast ratio minimum.",
+      "Do not use gray text on gray backgrounds."
+    ]
+  },
+  "layout_and_spacing": {
+    "spacing_scale": "Tailwind standard (p-4, p-6, p-8, p-12)",
+    "container": "max-w-7xl mx-auto px-4 sm:px-6 lg:px-8",
+    "rules": [
+      "Use generous padding (p-6 or p-8) inside cards.",
+      "Mobile-first: Implement single-column flows for checkout and settings.",
+      "Bottom Navigation for mobile to accommodate thumb-zone accessibility.",
+      "Grid layout: Use 'Bento' grid style for dashboards to maintain density but clear separation."
+    ]
+  },
+  "components": {
+    "cards": {
+      "style": "Rounded corners (rounded-2xl), soft ambient shadows in light mode, subtle 1px border in dark mode.",
+      "hover": "-translate-y-1 transition-transform duration-300 shadow-lg"
+    },
+    "buttons": {
+      "style": "Large touch targets (min h-12 or h-14). Fully rounded or rounded-xl.",
+      "primary": "bg-primary text-white hover:bg-[#1B4332] dark:hover:bg-[#22C55E] font-medium",
+      "secondary": "bg-secondary text-primary hover:bg-opacity-80 font-medium"
+    },
+    "inputs": {
+      "style": "Large tap areas, clear focus rings (ring-2 ring-primary ring-offset-2), rounded-xl, 1px solid border."
+    },
+    "navigation": {
+      "desktop": "Sticky glassmorphism header (backdrop-blur-xl bg-white/70 dark:bg-slate-900/70).",
+      "mobile": "Bottom navigation bar for critical paths."
+    }
+  },
+  "motion": {
+    "rules": [
+      "Use Framer Motion for smooth layout transitions.",
+      "Keep animations slow and purposeful (duration 0.2s - 0.3s).",
+      "Stagger list items slightly on load.",
+      "Respect prefers-reduced-motion."
+    ]
+  },
+  "accessibility": {
+    "rules": [
+      "All interactive elements MUST have data-testid attributes (e.g., data-testid='checkout-button').",
+      "Guest checkout must be default or highly visible.",
+      "Add aria-labels to all icon-only buttons.",
+      "Avoid hover-only menus; ensure click/tap to open."
+    ]
+  },
+  "icons": {
+    "library": "lucide-react",
+    "style": "Stroke-based, clear, slightly thicker (strokeWidth={2.5}) for better visibility."
+  },
+  "media": {
+    "hero_images": [
+      {
+        "url": "https://images.pexels.com/photos/16846734/pexels-photo-16846734.jpeg",
+        "description": "Three farmers cultivate rural fields at sunrise. Use for main landing hero."
+      },
+      {
+        "url": "https://images.pexels.com/photos/36004056/pexels-photo-36004056.jpeg",
+        "description": "Farmer silhouette at sunrise. Use for auth backgrounds or success stories."
+      }
+    ],
+    "category_images": [
+      {
+        "url": "https://images.pexels.com/photos/37321079/pexels-photo-37321079.jpeg",
+        "description": "Fresh vegetables for 'Vegetables' category card."
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1657288089316-c0350003ca49",
+        "description": "Basket of fresh organic vegetables for organic farming section."
+      },
+      {
+        "url": "https://images.pexels.com/photos/34374490/pexels-photo-34374490.jpeg",
+        "description": "Grain harvest/combine harvester for 'Grains/Wheat' category."
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Use Shadcn UI components but override border radii to be more rounded (e.g., rounded-2xl).",
+    "Ensure dark mode is fully implemented using Tailwind's dark: variant.",
+    "Implement language switcher and theme toggle in the main header.",
+    "For the AI Chat Assistant, use a floating action button (FAB) that expands into a clean, simple chat window.",
+    "Build multi-role dashboards using CSS Grid, ensuring data is legible with large typography.",
+    "Ensure the hero section uses the provided hero images with a semi-transparent gradient overlay (e.g., bg-black/40) so the white text is readable.",
+    "Include data-testid on every button, input, and interactive card."
+  ]
+}
