@@ -232,7 +232,7 @@ async def register(req: RegisterReq):
     }
     await db.users.insert_one(doc)
     token = make_jwt(user_id)
-    return {"token": token, "user": {k: v for k, v in doc.items() if k != "password"}}
+    return {"token": token, "user": {k: v for k, v in doc.items() if k not in ("password", "_id")}}
 
 
 @api.post("/auth/login")
@@ -591,12 +591,16 @@ async def price_predict(req: ChatReq, user: Optional[User] = Depends(optional_us
                        "Return: 'Suggested: ₹X-Y per <unit>. Why: ...'",
     ).with_model("anthropic", "claude-sonnet-4-5-20250929")
     full = ""
-    async for ev in chat.stream_message(UserMessage(text=req.message)):
-        if isinstance(ev, TextDelta):
-            full += ev.content
-        elif isinstance(ev, StreamDone):
-            break
-    return {"prediction": full}
+    try:
+        async for ev in chat.stream_message(UserMessage(text=req.message)):
+            if isinstance(ev, TextDelta):
+                full += ev.content
+            elif isinstance(ev, StreamDone):
+                break
+    except Exception as e:
+        logger.exception("price-predict failed")
+        return {"prediction": f"Suggested: market range varies. Please check local mandi rates. (AI temporarily unavailable: {type(e).__name__})"}
+    return {"prediction": full or "No prediction available."}
 
 
 # ------------------ Health ------------------

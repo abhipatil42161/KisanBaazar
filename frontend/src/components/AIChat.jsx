@@ -59,7 +59,7 @@ export default function AIChat() {
     <>
       {!open && (
         <button data-testid="ai-chat-open" onClick={() => setOpen(true)}
-          className="fixed bottom-6 right-6 z-50 w-16 h-16 rounded-full bg-primary text-primary-foreground shadow-2xl hover:scale-110 transition-transform flex items-center justify-center group">
+          className="fixed bottom-24 right-6 z-50 w-16 h-16 rounded-full bg-primary text-primary-foreground shadow-2xl hover:scale-110 transition-transform flex items-center justify-center group">
           <Sparkles size={26} strokeWidth={2.5} />
           <span className="absolute right-full mr-3 bg-card border border-border px-3 py-1.5 rounded-xl text-sm font-medium whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity">
             Ask AI
@@ -68,7 +68,7 @@ export default function AIChat() {
       )}
 
       {open && (
-        <div className="fixed bottom-6 right-6 z-50 w-[min(92vw,400px)] h-[min(80vh,600px)] bg-card border-2 border-border rounded-3xl shadow-2xl flex flex-col overflow-hidden">
+        <div className="fixed bottom-24 right-6 z-50 w-[min(92vw,400px)] h-[min(80vh,600px)] bg-card border-2 border-border rounded-3xl shadow-2xl flex flex-col overflow-hidden">
           <div className="px-5 py-4 bg-primary text-primary-foreground flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Sparkles size={20} strokeWidth={2.5} />

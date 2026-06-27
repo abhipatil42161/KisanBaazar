@@ -25,6 +25,11 @@ export const AuthProvider = ({ children }) => {
       setLoading(false);
       return;
     }
+    // Skip /me call if no token to avoid 401 console noise
+    if (!localStorage.getItem("kb_token")) {
+      setLoading(false);
+      return;
+    }
     fetchMe();
   }, [fetchMe]);
 
