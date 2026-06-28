@@ -170,35 +170,46 @@ def public_user(doc: dict) -> dict:
     return {k: v for k, v in doc.items() if k not in ("password", "_id")}
 
 
+def _user_id_from_jwt(bearer: str) -> tuple[Optional[str], Optional[str]]:
+    """Return (user_id, fallback_session_token). Decodes JWT; on failure treats bearer as session token."""
+    try:
+        payload = pyjwt.decode(bearer, JWT_SECRET, algorithms=["HS256"])
+        return payload.get("user_id"), None
+    except Exception:
+        return None, bearer
+
+
+async def _user_id_from_session(token: str) -> Optional[str]:
+    """Look up a session token in MongoDB; return user_id if valid and unexpired."""
+    sess = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
+    if not sess:
+        return None
+    expires_at = sess["expires_at"]
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
+        return None
+    return sess["user_id"]
+
+
 async def get_current_user(
     request: Request,
     session_token: Optional[str] = Cookie(None),
 ) -> User:
-    # Try cookie first
-    token = session_token
-    user_id = None
+    user_id: Optional[str] = None
+    token: Optional[str] = session_token
 
-    # Try Authorization header
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         bearer = auth.split(" ", 1)[1]
-        # First try as JWT
-        try:
-            payload = pyjwt.decode(bearer, JWT_SECRET, algorithms=["HS256"])
-            user_id = payload.get("user_id")
-        except Exception:
-            token = bearer  # treat as session_token
+        user_id, fallback_token = _user_id_from_jwt(bearer)
+        if fallback_token:
+            token = fallback_token
 
     if not user_id and token:
-        sess = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
-        if sess:
-            expires_at = sess["expires_at"]
-            if isinstance(expires_at, str):
-                expires_at = datetime.fromisoformat(expires_at)
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=timezone.utc)
-            if expires_at >= datetime.now(timezone.utc):
-                user_id = sess["user_id"]
+        user_id = await _user_id_from_session(token)
 
     if not user_id:
         raise HTTPException(401, "Not authenticated")

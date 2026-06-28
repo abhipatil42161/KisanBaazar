@@ -1,0 +1,24 @@
+{
+  "summary": "Iteration 6 auth-refactor regression testing PASSED. Verified the refactored get_current_user() and its two helpers (_user_id_from_jwt, _user_id_from_session) preserve behavior across all critical happy and sad paths. Backend: 9/9 auth-dependent endpoints behave correctly (login 3 roles, /auth/me with valid/missing/invalid token, dashboard stats, role-protected POST /products farmer-200/buyer-403, GET /orders). Frontend: full farmer login → /dashboard/farmer with stats AND full buyer login → add-to-cart → checkout → place-order → Order Confirmed (MOCKED Razorpay) flow both succeed.",
+  "tested_scope": ["backend", "frontend", "auth", "integration"],
+  "passed": [
+    "POST /api/auth/login farmer@kisanbaazar.in -> 200 + JWT + role=farmer",
+    "POST /api/auth/login buyer@kisanbaazar.in -> 200 + JWT + role=buyer",
+    "POST /api/auth/login admin@kisanbaazar.in -> 200 + JWT + role=admin",
+    "GET /api/auth/me with valid Bearer JWT -> 200 returns farmer user (validates _user_id_from_jwt)",
+    "GET /api/auth/me with NO Authorization header -> 401 Not authenticated (validates final guard clause)",
+    "GET /api/auth/me with INVALID Bearer token -> 401 Not authenticated (validates JWT fail -> session fallback -> 401)",
+    "GET /api/dashboard/stats farmer Bearer -> 200 {products:12, orders:0, revenue:0.0}",
+    "POST /api/products as farmer Bearer -> 200 product created (prod_4278feb859)",
+    "POST /api/products as buyer Bearer -> 403 'Only farmers can list products'",
+    "GET /api/orders as buyer Bearer -> 200 returns 3 historical orders",
+    "FE: Farmer UI login (login-email/login-password/login-submit) -> lands /dashboard/farmer, stats render (Active Listings 13, Orders 0, Revenue 0)",
+    "FE: Buyer UI login -> /dashboard/buyer -> Add product to cart -> /cart shows item & total -> Proceed to Checkout -> fill address+phone -> Pay -> 'Order Confirmed! Order ID: ord_49be1892bd' (MOCKED Razorpay)"
+  ],
+  "failed": [],
+  "action_items": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "retest_needed": false,
+  "full_testing_deferred": true,
+  "notes": "Razorpay payment is MOCKED as documented; success page shows 'MOCK Razorpay payment processed' confirming /api/orders/{id}/pay path. Initial UI attempt failed on selector 'Add to Cart' — actual button label is 'Add'; selector fixed and retest succeeded (not an app bug). The refactored auth helpers behave identically to prior iterations across all 12 verified paths."
+}
