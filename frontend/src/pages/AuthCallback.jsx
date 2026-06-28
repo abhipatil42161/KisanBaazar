@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
@@ -7,8 +7,11 @@ export default function AuthCallback() {
   const nav = useNavigate();
   const { refresh } = useAuth();
   const [error, setError] = useState(null);
+  const processed = useRef(false);
 
   useEffect(() => {
+    if (processed.current) return;
+    processed.current = true;
     const hash = window.location.hash;
     const m = hash.match(/session_id=([^&]+)/);
     if (!m) { setError("Missing session"); return; }
@@ -20,7 +23,7 @@ export default function AuthCallback() {
         nav("/dashboard/buyer", { replace: true });
       })
       .catch((e) => setError(e.response?.data?.detail || "Auth failed"));
-  }, []);
+  }, [nav, refresh]);
 
   return (
     <div className="min-h-[60vh] flex items-center justify-center">

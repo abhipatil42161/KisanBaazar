@@ -13,7 +13,7 @@ export default function Footer() {
             <span className="font-heading font-bold text-xl">KisanBaazar</span>
           </div>
           <p className="text-sm text-muted-foreground leading-relaxed">
-            Connecting India's farmers directly to the world. Transparent. Trusted. Trade.
+            Connecting India&apos;s farmers directly to the world. Transparent. Trusted. Trade.
           </p>
         </div>
 

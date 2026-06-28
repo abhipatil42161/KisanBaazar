@@ -1,0 +1,29 @@
+{
+  "summary": "Regression check after refactor (hook deps, stable keys, public_user helper). All previously broken issues are now fixed: /api/auth/register returns 200 with sanitized user (no _id/password), /api/ai/price-predict returns 200 with prediction text. All other endpoints continue to work. Frontend renders cleanly with zero React errors/warnings. Farmer login + dashboard with useCallback'd load works. Products filters update URL correctly. AI chat button no longer overlapped (visible above Emergent badge in screenshot).",
+  "tested_scope": ["backend", "frontend", "auth", "integration"],
+  "passed": [
+    "POST /api/auth/register -> 200, response excludes _id and password (public_user helper applied)",
+    "POST /api/auth/login farmer@kisanbaazar.in/farmer123 -> 200 with token + sanitized user",
+    "POST /api/auth/login buyer@kisanbaazar.in/buyer123 -> 200 with token + sanitized user",
+    "GET /api/auth/me with Bearer token returns farmer user",
+    "GET /api/products returns 14 products (12 seed + 2 test-created carryover)",
+    "GET /api/products?category=fruits&organic=true filter works correctly",
+    "POST /api/orders creates order (total=90, razorpay_order_id present) with correct schema (items[].title/qty/price, delivery_address)",
+    "POST /api/orders/{id}/pay -> 200 ok:true with mock payment_id (Razorpay MOCKED)",
+    "POST /api/ai/chat streams real Claude response (Namaste + Kharif crops content)",
+    "POST /api/ai/price-predict -> 200 returns full prediction string (PREVIOUSLY BROKEN, now fixed)",
+    "Home page renders without React errors",
+    "Products page filters: clicking [data-testid=cat-fruits] -> URL ?category=fruits; [data-testid=filter-organic] -> URL ?category=fruits&organic=true",
+    "Farmer login (login-email/password/submit) redirects to /dashboard/farmer",
+    "Farmer dashboard shows Active Listings (14), Orders (3), Total Revenue (Rs.1,095), My Listings, Recent Orders — useCallback'd load works",
+    "Zero React pageerror events captured during navigation across Home, Products, Login, Dashboard",
+    "AI chat floating button visible at bottom-right and not overlapped by Emergent badge (per screenshot)"
+  ],
+  "failed": [],
+  "action_items": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "retest_needed": false,
+  "full_testing_deferred": true,
+  "test_credentials": "Loaded from /app/memory/test_credentials.md; farmer + buyer verified.",
+  "notes": "Did not exhaustively re-run: full buyer checkout UI flow, Add-Product modal submission, AI chat send via UI, product detail qty buttons. Backend equivalents all pass. Razorpay payment remains MOCKED (pay_mock_*). Build was already 'Compiled successfully' with zero warnings per main agent."
+}

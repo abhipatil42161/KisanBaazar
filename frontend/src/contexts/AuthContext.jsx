@@ -48,7 +48,7 @@ export const AuthProvider = ({ children }) => {
   };
 
   const logout = async () => {
-    try { await api.post("/auth/logout"); } catch {}
+    try { await api.post("/auth/logout"); } catch { /* ignore */ }
     localStorage.removeItem("kb_token");
     setUser(null);
   };

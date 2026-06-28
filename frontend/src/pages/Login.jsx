@@ -35,7 +35,7 @@ export default function Login() {
           <div>
             <Sprout size={48} strokeWidth={2} />
             <h2 className="font-heading font-bold text-4xl mt-4">Welcome back, partner.</h2>
-            <p className="mt-3 text-white/90 text-lg">Continue building India's largest farm-to-world marketplace.</p>
+            <p className="mt-3 text-white/90 text-lg">Continue building India&apos;s largest farm-to-world marketplace.</p>
           </div>
         </div>
       </div>

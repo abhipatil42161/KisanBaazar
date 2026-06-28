@@ -7,12 +7,13 @@ import { API } from "@/lib/api";
 export default function AIChat() {
   const [open, setOpen] = useState(false);
   const [msgs, setMsgs] = useState([
-    { role: "ai", text: "Namaste! I'm your KisanBaazar AI. Ask me about crop prices, organic certification, export procedures, or government schemes." },
+    { id: "greet", role: "ai", text: "Namaste! I'm your KisanBaazar AI. Ask me about crop prices, organic certification, export procedures, or government schemes." },
   ]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const scrollRef = useRef(null);
   const sessionRef = useRef(null);
+  const msgIdRef = useRef(1);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -22,7 +23,9 @@ export default function AIChat() {
     const text = input.trim();
     if (!text || streaming) return;
     setInput("");
-    setMsgs((m) => [...m, { role: "user", text }, { role: "ai", text: "" }]);
+    const userId = `u-${msgIdRef.current++}`;
+    const aiId = `a-${msgIdRef.current++}`;
+    setMsgs((m) => [...m, { id: userId, role: "user", text }, { id: aiId, role: "ai", text: "" }]);
     setStreaming(true);
 
     try {
@@ -38,18 +41,10 @@ export default function AIChat() {
         const { done, value } = await reader.read();
         if (done) break;
         const chunk = decoder.decode(value, { stream: true });
-        setMsgs((m) => {
-          const copy = [...m];
-          copy[copy.length - 1] = { role: "ai", text: copy[copy.length - 1].text + chunk };
-          return copy;
-        });
+        setMsgs((m) => m.map((msg) => msg.id === aiId ? { ...msg, text: msg.text + chunk } : msg));
       }
-    } catch (e) {
-      setMsgs((m) => {
-        const copy = [...m];
-        copy[copy.length - 1] = { role: "ai", text: "Sorry, I'm unavailable. Please try again." };
-        return copy;
-      });
+    } catch {
+      setMsgs((m) => m.map((msg) => msg.id === aiId ? { ...msg, text: "Sorry, I'm unavailable. Please try again." } : msg));
     } finally {
       setStreaming(false);
     }
@@ -84,8 +79,8 @@ export default function AIChat() {
           </div>
 
           <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-3">
-            {msgs.map((m, i) => (
-              <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+            {msgs.map((m) => (
+              <div key={m.id} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
                 <div className={`max-w-[85%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap ${
                   m.role === "user" ? "bg-primary text-primary-foreground rounded-br-sm" : "bg-muted rounded-bl-sm"
                 }`}>

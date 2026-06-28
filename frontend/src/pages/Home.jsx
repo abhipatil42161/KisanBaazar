@@ -23,22 +23,29 @@ const CATEGORY_BG = {
 };
 
 const SCHEMES = [
-  { title: "PM-KISAN Samman Nidhi", desc: "₹6,000/year direct income support to small & marginal farmers.", tag: "Active" },
-  { title: "e-NAM Integration", desc: "Trade your produce on India's largest digital agriculture market.", tag: "Live" },
-  { title: "PMFBY Crop Insurance", desc: "Comprehensive crop insurance against natural calamities.", tag: "Open" },
-  { title: "Soil Health Card", desc: "Free soil testing and crop-specific nutrient recommendations.", tag: "Free" },
+  { id: "pm-kisan", title: "PM-KISAN Samman Nidhi", desc: "₹6,000/year direct income support to small & marginal farmers.", tag: "Active" },
+  { id: "e-nam", title: "e-NAM Integration", desc: "Trade your produce on India's largest digital agriculture market.", tag: "Live" },
+  { id: "pmfby", title: "PMFBY Crop Insurance", desc: "Comprehensive crop insurance against natural calamities.", tag: "Open" },
+  { id: "soil-health", title: "Soil Health Card", desc: "Free soil testing and crop-specific nutrient recommendations.", tag: "Free" },
 ];
 
 const STORIES = [
-  { name: "Suresh Yadav", crop: "Banana Exporter", earnings: "₹18L/yr", quote: "KisanBaazar connected me to Dubai buyers. My income tripled in 2 years.", img: "https://images.pexels.com/photos/36004056/pexels-photo-36004056.jpeg" },
-  { name: "Lakshmi Devi", crop: "Organic Spices", earnings: "₹9L/yr", quote: "Direct buyers from Germany. No commission agents. Fair price for my turmeric.", img: "https://images.unsplash.com/photo-1582719508461-905c673771fd?w=600" },
-  { name: "Karthik Reddy", crop: "Pomegranate Auctions", earnings: "₹24L/yr", quote: "Auction system gave me 40% higher prices than mandi rates. Game changer.", img: "https://images.unsplash.com/photo-1500382017468-9049fed747ef?w=600" },
+  { id: "suresh", name: "Suresh Yadav", crop: "Banana Exporter", earnings: "₹18L/yr", quote: "KisanBaazar connected me to Dubai buyers. My income tripled in 2 years.", img: "https://images.pexels.com/photos/36004056/pexels-photo-36004056.jpeg" },
+  { id: "lakshmi", name: "Lakshmi Devi", crop: "Organic Spices", earnings: "₹9L/yr", quote: "Direct buyers from Germany. No commission agents. Fair price for my turmeric.", img: "https://images.unsplash.com/photo-1582719508461-905c673771fd?w=600" },
+  { id: "karthik", name: "Karthik Reddy", crop: "Pomegranate Auctions", earnings: "₹24L/yr", quote: "Auction system gave me 40% higher prices than mandi rates. Game changer.", img: "https://images.unsplash.com/photo-1500382017468-9049fed747ef?w=600" },
 ];
 
 const TESTIMONIALS = [
-  { name: "Rajesh Foods", role: "Food Processing Co.", quote: "Sourcing 50+ tonnes of basmati monthly. Quality consistent, paperwork seamless." },
-  { name: "Anita Kapur", role: "Restaurant Chain", quote: "Farm-fresh vegetables direct from Pune. My chefs love the quality." },
-  { name: "Emirates Trading", role: "International Buyer", quote: "Reliable Indian exporters, GST-compliant invoices, on-time shipments." },
+  { id: "rajesh", name: "Rajesh Foods", role: "Food Processing Co.", quote: "Sourcing 50+ tonnes of basmati monthly. Quality consistent, paperwork seamless." },
+  { id: "anita", name: "Anita Kapur", role: "Restaurant Chain", quote: "Farm-fresh vegetables direct from Pune. My chefs love the quality." },
+  { id: "emirates", name: "Emirates Trading", role: "International Buyer", quote: "Reliable Indian exporters, GST-compliant invoices, on-time shipments." },
+];
+
+const HERO_BADGES = [
+  { id: "fee", icon: ShieldCheck, txt: "0% Reg. Fee" },
+  { id: "ship", icon: Truck, txt: "Pan-India Delivery" },
+  { id: "export", icon: Globe2, txt: "Export Ready" },
+  { id: "price", icon: IndianRupee, txt: "Transparent Pricing" },
 ];
 
 export default function Home() {
@@ -92,13 +99,8 @@ export default function Home() {
             </form>
 
             <div className="mt-10 grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
-              {[
-                { icon: ShieldCheck, txt: "0% Reg. Fee" },
-                { icon: Truck, txt: "Pan-India Delivery" },
-                { icon: Globe2, txt: "Export Ready" },
-                { icon: IndianRupee, txt: "Transparent Pricing" },
-              ].map((b, i) => (
-                <div key={i} className="flex items-center gap-2 bg-white/10 backdrop-blur rounded-xl px-3 py-2">
+              {HERO_BADGES.map((b) => (
+                <div key={b.id} className="flex items-center gap-2 bg-white/10 backdrop-blur rounded-xl px-3 py-2">
                   <b.icon size={18} /> <span className="font-medium">{b.txt}</span>
                 </div>
               ))}
@@ -155,8 +157,8 @@ export default function Home() {
           <h2 className="font-heading font-bold text-3xl sm:text-4xl mb-2">{t("schemes_title")}</h2>
           <p className="text-muted-foreground mb-8">Stay updated on benefits, subsidies, and policies.</p>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
-            {SCHEMES.map((s, i) => (
-              <div key={i} className="bg-card border-2 border-border rounded-2xl p-6 card-hover">
+            {SCHEMES.map((s) => (
+              <div key={s.id} className="bg-card border-2 border-border rounded-2xl p-6 card-hover">
                 <div className="inline-block bg-accent/20 text-accent-foreground text-xs font-semibold px-2.5 py-1 rounded-full mb-3">{s.tag}</div>
                 <h3 className="font-heading font-semibold text-lg mb-2">{s.title}</h3>
                 <p className="text-sm text-muted-foreground">{s.desc}</p>
@@ -171,8 +173,8 @@ export default function Home() {
         <h2 className="font-heading font-bold text-3xl sm:text-4xl mb-2">{t("stories_title")}</h2>
         <p className="text-muted-foreground mb-8">Real farmers. Real income. Real change.</p>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {STORIES.map((s, i) => (
-            <div key={i} className="relative rounded-2xl overflow-hidden card-hover h-80 group">
+          {STORIES.map((s) => (
+            <div key={s.id} className="relative rounded-2xl overflow-hidden card-hover h-80 group">
               <img src={s.img} alt={s.name} className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
               <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/40 to-transparent" />
               <div className="relative h-full flex flex-col justify-end p-6 text-white">
@@ -193,8 +195,8 @@ export default function Home() {
         <h2 className="font-heading font-bold text-3xl sm:text-4xl mb-2">{t("testimonials_title")}</h2>
         <p className="text-muted-foreground mb-8">Trusted by global buyers and Indian retailers.</p>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {TESTIMONIALS.map((tm, i) => (
-            <div key={i} className="bg-card border-2 border-border rounded-2xl p-6 card-hover">
+          {TESTIMONIALS.map((tm) => (
+            <div key={tm.id} className="bg-card border-2 border-border rounded-2xl p-6 card-hover">
               <Quote className="text-primary mb-3" size={22} />
               <p className="leading-relaxed">{tm.quote}</p>
               <div className="mt-4 pt-4 border-t border-border">

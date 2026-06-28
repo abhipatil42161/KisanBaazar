@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -19,8 +19,8 @@ export default function ProductDetail() {
   const { add } = useCart();
   const { user } = useAuth();
 
-  const load = () => api.get(`/products/${id}`).then((r) => { setP(r.data); setQty(r.data.moq || 1); });
-  useEffect(() => { load(); }, [id]);
+  const load = useCallback(() => api.get(`/products/${id}`).then((r) => { setP(r.data); setQty(r.data.moq || 1); }), [id]);
+  useEffect(() => { load(); }, [load]);
 
   if (!p) return <div className="max-w-7xl mx-auto p-8">Loading…</div>;
 

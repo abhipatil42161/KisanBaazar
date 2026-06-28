@@ -161,8 +161,13 @@ def verify_pw(pw: str, hashed: str) -> bool:
 
 
 def make_jwt(user_id: str) -> str:
-    payload = {"user_id": user_id, "exp": datetime.now(timezone.utc) + timedelta(days=7)}
+    payload: dict = {"user_id": user_id, "exp": datetime.now(timezone.utc) + timedelta(days=7)}
     return pyjwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+
+def public_user(doc: dict) -> dict:
+    """Strip private fields (password, _id) from a user document."""
+    return {k: v for k, v in doc.items() if k not in ("password", "_id")}
 
 
 async def get_current_user(
@@ -305,8 +310,7 @@ async def google_session(request: Request, response: Response):
         "session_token", session_token, httponly=True, secure=True, samesite="none", path="/",
         max_age=7 * 24 * 3600,
     )
-    user.pop("password", None)
-    return {"user": user, "token": session_token}
+    return {"user": public_user(user), "token": session_token}
 
 
 # ------------------ Products ------------------

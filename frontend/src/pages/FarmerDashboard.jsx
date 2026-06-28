@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,7 +11,7 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
-import { Plus, Sparkles, IndianRupee, Package, ShoppingBag, TrendingUp, Trash2 } from "lucide-react";
+import { Plus, Sparkles, IndianRupee, Package, ShoppingBag, Trash2 } from "lucide-react";
 
 const empty = {
   title: "", description: "", category: "vegetables", price: "", unit: "kg", moq: 1, available_qty: 100,
@@ -30,7 +30,7 @@ export default function FarmerDashboard() {
   const [predicting, setPredicting] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     const [s, p, o, c] = await Promise.all([
       api.get("/dashboard/stats"),
       api.get("/products"),
@@ -41,9 +41,9 @@ export default function FarmerDashboard() {
     setProducts(p.data.filter((x) => x.farmer_id === user.user_id));
     setOrders(o.data);
     setCats(c.data);
-  };
+  }, [user.user_id]);
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [load]);
 
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 

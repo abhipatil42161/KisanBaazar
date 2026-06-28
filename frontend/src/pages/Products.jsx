@@ -18,6 +18,7 @@ export default function Products() {
   const organic = sp.get("organic") === "true";
   const exportReady = sp.get("export_ready") === "true";
   const auction = sp.get("auction") === "true";
+  const queryStr = sp.get("q") || "";
 
   useEffect(() => {
     api.get("/categories").then((r) => setCats(r.data));
@@ -26,13 +27,13 @@ export default function Products() {
   useEffect(() => {
     setLoading(true);
     const params = {};
-    if (sp.get("q")) params.q = sp.get("q");
+    if (queryStr) params.q = queryStr;
     if (category) params.category = category;
     if (organic) params.organic = true;
     if (exportReady) params.export_ready = true;
     if (auction) params.auction = true;
     api.get("/products", { params }).then((r) => { setProducts(r.data); setLoading(false); });
-  }, [sp]);
+  }, [queryStr, category, organic, exportReady, auction]);
 
   const updateParam = (key, val) => {
     const next = new URLSearchParams(sp);
@@ -101,8 +102,8 @@ export default function Products() {
           </div>
           {loading ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-5">
-              {Array(6).fill(0).map((_, i) => (
-                <div key={i} className="bg-muted rounded-2xl aspect-[4/3] animate-pulse" />
+              {["a", "b", "c", "d", "e", "f"].map((k) => (
+                <div key={k} className="bg-muted rounded-2xl aspect-[4/3] animate-pulse" />
               ))}
             </div>
           ) : products.length === 0 ? (
