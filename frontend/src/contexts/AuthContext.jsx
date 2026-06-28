@@ -43,8 +43,9 @@ export const AuthProvider = ({ children }) => {
   const logout = useCallback(async () => {
     try {
       await api.post("/auth/logout");
-    } catch {
-      // Logout failures are non-fatal; client-side cleanup proceeds.
+    } catch (logoutErr) {
+      // Logout failures are non-fatal (e.g. network); still clear client state.
+      console.warn("[auth] Logout request failed; clearing local state anyway:", logoutErr);
     }
     setUser(null);
   }, []);

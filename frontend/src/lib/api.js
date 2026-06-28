@@ -43,8 +43,9 @@ api.interceptors.response.use(
         const token = readCookie(CSRF_COOKIE);
         if (token) cfg.headers = { ...(cfg.headers || {}), [CSRF_HEADER]: token };
         return api(cfg);
-      } catch {
-        // fall through
+      } catch (csrfErr) {
+        // CSRF bootstrap failed — log and fall through to reject the original 403.
+        console.warn("[api] CSRF token refresh failed, propagating original 403:", csrfErr);
       }
     }
     return Promise.reject(error);

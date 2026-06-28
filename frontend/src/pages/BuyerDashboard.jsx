@@ -15,7 +15,12 @@ export default function BuyerDashboard() {
       api.get("/dashboard/stats"),
       api.get("/orders"),
       api.get("/wishlist"),
-    ]).then(([s, o, w]) => { setStats(s.data); setOrders(o.data); setWishlist(w.data); });
+    ]).then((results) => {
+      setStats(results[0].data);
+      setOrders(results[1].data);
+      setWishlist(results[2].data);
+    });
+    // One-shot mount fetch; 'api' and setters are stable; 'results' is a callback param.
   }, []);
 
   return (

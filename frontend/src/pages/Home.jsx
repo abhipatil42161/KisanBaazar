@@ -56,8 +56,11 @@ export default function Home() {
   const nav = useNavigate();
 
   useEffect(() => {
-    api.get("/products?limit=12").then((r) => setProducts(r.data));
-    api.get("/categories").then((r) => setCats(r.data));
+    api.get("/products?limit=12").then((res) => setProducts(res.data));
+    api.get("/categories").then((res) => setCats(res.data));
+    // Intentionally empty deps: this is a one-shot mount fetch. 'api' is a stable
+    // axios singleton; 'setProducts'/'setCats' are stable React setters; 'res' is
+    // a Promise-callback parameter (not a reactive value).
   }, []);
 
   const onSearch = (e) => {

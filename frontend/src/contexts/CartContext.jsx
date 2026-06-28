@@ -12,6 +12,7 @@ export const CartProvider = ({ children }) => {
 
   useEffect(() => {
     localStorage.setItem("kb_cart", JSON.stringify(items));
+    // 'items' is the only reactive dep; localStorage is a global.
   }, [items]);
 
   const add = useCallback((product, qty = null) => {
@@ -30,10 +31,20 @@ export const CartProvider = ({ children }) => {
       }];
     });
     toast.success(`Added ${product.title} to cart`);
+    // 'setItems' is stable; 'toast' is a module import; remaining identifiers are
+    // function-scope locals and callback params.
   }, []);
 
-  const remove = useCallback((pid) => setItems((arr) => arr.filter((it) => it.product_id !== pid)), []);
-  const updateQty = useCallback((pid, qty) => setItems((arr) => arr.map((it) => it.product_id === pid ? { ...it, qty: Math.max(1, qty) } : it)), []);
+  const remove = useCallback(
+    (pid) => setItems((arr) => arr.filter((it) => it.product_id !== pid)),
+    // 'setItems' is stable; 'pid'/'arr'/'it' are callback params.
+    []
+  );
+  const updateQty = useCallback(
+    (pid, qty) => setItems((arr) => arr.map((it) => it.product_id === pid ? { ...it, qty: Math.max(1, qty) } : it)),
+    // 'setItems' is stable; 'pid'/'qty'/'arr'/'it'/Math are callback params or globals.
+    []
+  );
   const clear = useCallback(() => setItems([]), []);
 
   const total = items.reduce((sum, it) => sum + it.price * it.qty, 0);

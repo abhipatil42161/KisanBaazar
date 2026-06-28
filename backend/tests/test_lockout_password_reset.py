@@ -40,7 +40,7 @@ BACKEND_LOG = "/var/log/supervisor/backend.err.log"
 
 
 # ------------------ Mongo helpers (sync via subprocess to keep tests simple) ------------------
-def _mongo_eval(js: str) -> str:
+def _mongo_run(js: str) -> str:
     r = subprocess.run(
         ["mongosh", DB_NAME, "--quiet", "--eval", js],
         capture_output=True, text=True, timeout=20,
@@ -49,20 +49,20 @@ def _mongo_eval(js: str) -> str:
 
 
 def _clear_login_attempts_for(email: str):
-    _mongo_eval(f'db.login_attempts.deleteMany({{identifier:{{$regex:":{email}$"}}}})')
+    _mongo_run(f'db.login_attempts.deleteMany({{identifier:{{$regex:":{email}$"}}}})')
 
 
 def _delete_reset_tokens_for(email: str):
-    _mongo_eval(f'db.password_reset_tokens.deleteMany({{email:"{email}"}})')
+    _mongo_run(f'db.password_reset_tokens.deleteMany({{email:"{email}"}})')
 
 
 def _delete_user(email: str):
-    _mongo_eval(f'db.users.deleteOne({{email:"{email}"}})')
+    _mongo_run(f'db.users.deleteOne({{email:"{email}"}})')
 
 
 def _set_token_expired(token: str):
     past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-    _mongo_eval(f'db.password_reset_tokens.updateOne({{token:"{token}"}},{{$set:{{expires_at:new Date("{past}")}}}})')
+    _mongo_run(f'db.password_reset_tokens.updateOne({{token:"{token}"}},{{$set:{{expires_at:new Date("{past}")}}}})')
 
 
 def _read_latest_reset_link(email: str) -> str:
@@ -154,7 +154,7 @@ class TestBruteForceLockout:
                              json={"email": self.victim, "password": self.pw}, timeout=15)
         assert good.status_code == 200, good.text
         # login_attempts record should be gone
-        out = _mongo_eval(f'db.login_attempts.find({{identifier:{{$regex:":{self.victim}$"}}}}).toArray()')
+        out = _mongo_run(f'db.login_attempts.find({{identifier:{{$regex:":{self.victim}$"}}}}).toArray()')
         assert "[]" in out.replace(" ", "").replace("\n", "") or self.victim not in out, \
             f"expected no login_attempts after success, got: {out}"
 
@@ -197,7 +197,7 @@ class TestForgotPassword:
             assert tok and len(tok) > 10, f"reset link not found in {BACKEND_LOG} for {email}"
 
             # Token must exist in DB, with used=false and future expiry
-            out = _mongo_eval(f'JSON.stringify(db.password_reset_tokens.findOne({{token:"{tok}"}}))')
+            out = _mongo_run(f'JSON.stringify(db.password_reset_tokens.findOne({{token:"{tok}"}}))')
             assert email.lower() in out.lower(), f"token row missing or wrong email: {out}"
             assert '"used":false' in out.replace(" ", ""), f"expected used=false: {out}"
         finally:
@@ -212,7 +212,7 @@ class TestForgotPassword:
         assert "if an account exists" in msg.lower() or "reset link" in msg.lower()
 
         # No token row created
-        out = _mongo_eval(f'db.password_reset_tokens.countDocuments({{email:"{ghost}"}})')
+        out = _mongo_run(f'db.password_reset_tokens.countDocuments({{email:"{ghost}"}})')
         assert "0" in out, f"unexpected token row for ghost email: {out}"
 
     def test_csrf_exempt_no_cookies(self):
@@ -262,7 +262,7 @@ class TestResetPassword:
             assert r_new.status_code == 200, f"new pw should succeed: {r_new.status_code} {r_new.text}"
 
             # Token marked used
-            out = _mongo_eval(f'JSON.stringify(db.password_reset_tokens.findOne({{token:"{tok}"}}))')
+            out = _mongo_run(f'JSON.stringify(db.password_reset_tokens.findOne({{token:"{tok}"}}))')
             assert '"used":true' in out.replace(" ", ""), f"token not marked used: {out}"
 
             # Reuse should fail
@@ -347,7 +347,7 @@ class TestResetPassword:
 # ============================================================
 class TestMongoIndexes:
     def test_password_reset_tokens_indexes(self):
-        out = _mongo_eval('JSON.stringify(db.password_reset_tokens.getIndexes())')
+        out = _mongo_run('JSON.stringify(db.password_reset_tokens.getIndexes())')
         flat = out.replace(" ", "")
         assert '"expires_at":1' in flat, f"missing expires_at index: {out}"
         assert '"expireAfterSeconds":0' in flat, f"expires_at must be TTL with expireAfterSeconds:0: {out}"
@@ -356,7 +356,7 @@ class TestMongoIndexes:
         assert '"unique":true' in flat, f"expected at least one unique index: {out}"
 
     def test_login_attempts_identifier_unique(self):
-        out = _mongo_eval('JSON.stringify(db.login_attempts.getIndexes())')
+        out = _mongo_run('JSON.stringify(db.login_attempts.getIndexes())')
         flat = out.replace(" ", "")
         assert '"identifier":1' in flat, f"missing identifier index: {out}"
         assert '"unique":true' in flat, f"identifier must be unique: {out}"

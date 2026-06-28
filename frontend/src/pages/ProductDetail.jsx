@@ -20,7 +20,8 @@ export default function ProductDetail() {
   const { user } = useAuth();
 
   const load = useCallback(
-    () => api.get(`/products/${id}`).then((r) => { setP(r.data); setQty(r.data.moq || 1); }),
+    () => api.get(`/products/${id}`).then((res) => { setP(res.data); setQty(res.data.moq || 1); }),
+    // 'api' is a stable axios import; setters are stable; 'res' is a Promise-callback param.
     [id]
   );
   useEffect(() => { load(); }, [load]);

@@ -8,16 +8,18 @@ export function useFarmerData(userId) {
   const [cats, setCats] = useState([]);
 
   const load = useCallback(async () => {
-    const [s, p, o, c] = await Promise.all([
+    const results = await Promise.all([
       api.get("/dashboard/stats"),
       api.get("/products"),
       api.get("/orders"),
       api.get("/categories"),
     ]);
-    setStats(s.data);
-    setProducts(p.data.filter((x) => x.farmer_id === userId));
-    setOrders(o.data);
-    setCats(c.data);
+    setStats(results[0].data);
+    setProducts(results[1].data.filter((item) => item.farmer_id === userId));
+    setOrders(results[2].data);
+    setCats(results[3].data);
+    // 'userId' is the only reactive dep. 'api', setters, 'results' and 'item' are
+    // either stable imports, stable React setters, or function-scope locals.
   }, [userId]);
 
   useEffect(() => { load(); }, [load]);

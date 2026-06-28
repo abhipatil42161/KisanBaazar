@@ -143,6 +143,9 @@ function useToast() {
         listeners.splice(index, 1)
       }
     };
+    // 'setState' (React.useState setter) is stable; 'listeners' is a module-scope
+    // array; 'index' is a function-scope local. Effect intentionally re-subscribes
+    // on every state change to stay in sync with the toast store.
   }, [state])
 
   return {

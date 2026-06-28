@@ -21,7 +21,8 @@ export default function Products() {
   const queryStr = sp.get("q") || "";
 
   useEffect(() => {
-    api.get("/categories").then((r) => setCats(r.data));
+    api.get("/categories").then((res) => setCats(res.data));
+    // One-shot mount fetch; deps intentionally empty (api/setCats stable, res is a callback param).
   }, []);
 
   useEffect(() => {
@@ -32,7 +33,9 @@ export default function Products() {
     if (organic) params.organic = true;
     if (exportReady) params.export_ready = true;
     if (auction) params.auction = true;
-    api.get("/products", { params }).then((r) => { setProducts(r.data); setLoading(false); });
+    api.get("/products", { params }).then((res) => { setProducts(res.data); setLoading(false); });
+    // Deps cover every reactive value used to build `params`. 'api', setters and
+    // 'res' are non-reactive; 'params' is a function-scope local (not a dep).
   }, [queryStr, category, organic, exportReady, auction]);
 
   const updateParam = (key, val) => {

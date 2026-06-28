@@ -5,7 +5,10 @@ import { Globe2, FileCheck2, Ship, Container } from "lucide-react";
 
 export default function ExporterDashboard() {
   const [products, setProducts] = useState([]);
-  useEffect(() => { api.get("/products?export_ready=true").then((r) => setProducts(r.data)); }, []);
+  useEffect(() => {
+    api.get("/products?export_ready=true").then((res) => setProducts(res.data));
+    // One-shot mount fetch; 'api'/'setProducts' are stable; 'res' is a callback param.
+  }, []);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">

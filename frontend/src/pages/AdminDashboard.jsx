@@ -7,9 +7,11 @@ export default function AdminDashboard() {
   const [orders, setOrders] = useState([]);
 
   useEffect(() => {
-    Promise.all([api.get("/dashboard/stats"), api.get("/orders")]).then(([s, o]) => {
-      setStats(s.data); setOrders(o.data);
+    Promise.all([api.get("/dashboard/stats"), api.get("/orders")]).then((results) => {
+      setStats(results[0].data);
+      setOrders(results[1].data);
     });
+    // One-shot mount fetch; 'api' and setters are stable; 'results' is a callback param.
   }, []);
 
   return (

@@ -393,7 +393,11 @@ async def login(req: LoginReq, request: Request, response: Response):
         attempts = await record_failed_login(identifier)
         remaining = max(0, LOCK_THRESHOLD - attempts)
         if remaining == 0:
-            raise HTTPException(429, "Too many failed attempts. Account locked for 15 minutes.")
+            raise HTTPException(
+                status_code=429,
+                detail="Too many failed attempts. Account locked for 15 minutes.",
+                headers={"Retry-After": str(int(LOCK_DURATION.total_seconds()))},
+            )
         if remaining <= 2:
             raise HTTPException(401, f"Invalid credentials ({remaining} attempt{'s' if remaining != 1 else ''} remaining)")
         raise HTTPException(401, "Invalid credentials")

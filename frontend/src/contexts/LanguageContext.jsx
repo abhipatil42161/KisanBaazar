@@ -10,9 +10,14 @@ export const LanguageProvider = ({ children }) => {
   const setLanguage = useCallback((l) => {
     setLang(l);
     localStorage.setItem("kb_lang", l);
+    // 'setLang' from useState is stable; localStorage is a global.
   }, []);
 
-  const t = useCallback((key) => translate(lang, key), [lang]);
+  const t = useCallback(
+    (key) => translate(lang, key),
+    // 'translate' is a module-scope import; 'lang' is the only reactive dep.
+    [lang]
+  );
 
   const value = useMemo(() => ({ lang, setLanguage, t }), [lang, setLanguage, t]);
 

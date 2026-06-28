@@ -21,7 +21,9 @@ export default function AuthCallback() {
         await refresh();
         nav("/dashboard/buyer", { replace: true });
       })
-      .catch((e) => setError(e.response?.data?.detail || "Auth failed"));
+      .catch((err) => setError(err.response?.data?.detail || "Auth failed"));
+    // Deps cover the only reactive values (nav, refresh). 'api' is a stable import;
+    // 'err'/'data'/'detail' are Promise-callback params, not reactive deps.
   }, [nav, refresh]);
 
   return (

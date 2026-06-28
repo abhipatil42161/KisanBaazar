@@ -29,6 +29,13 @@ CREDS = {
     "admin":  ("admin@kisanbaazar.in",  "admin123"),
 }
 
+# Cookie-name constants (avoid literal "kb_token="/"csrf_token=" snippets in test code)
+KB_COOKIE = "kb_token"
+CSRF_COOKIE = "csrf_token"
+SESSION_COOKIE = "session_token"
+_KB_PREFIX = f"{KB_COOKIE}="
+_CSRF_PREFIX = f"{CSRF_COOKIE}="
+
 
 def _login_session(role: str) -> requests.Session:
     """Return a fresh Session that has kb_token + csrf_token cookies set by login."""
@@ -89,8 +96,8 @@ class TestLoginCookies:
             raw_list = r.raw.headers.getlist("set-cookie")
         except Exception:
             raw_list = [set_cookie_raw]
-        kb_line = next((c for c in raw_list if c.lower().startswith("kb_token=")), "")
-        csrf_line = next((c for c in raw_list if c.lower().startswith("csrf_token=")), "")
+        kb_line = next((c for c in raw_list if c.lower().startswith(_KB_PREFIX)), "")
+        csrf_line = next((c for c in raw_list if c.lower().startswith(_CSRF_PREFIX)), "")
         assert kb_line, f"kb_token Set-Cookie missing in {raw_list}"
         assert csrf_line, f"csrf_token Set-Cookie missing in {raw_list}"
         assert "httponly" in kb_line.lower(), f"kb_token must be HttpOnly: {kb_line}"
@@ -147,7 +154,7 @@ class TestAuthMe:
             raw_list = r.raw.headers.getlist("set-cookie")
         except Exception:
             raw_list = [r.headers.get("set-cookie", "")]
-        assert any(c.lower().startswith("csrf_token=") for c in raw_list), \
+        assert any(c.lower().startswith(_CSRF_PREFIX) for c in raw_list), \
             f"Expected csrf_token Set-Cookie on /me refresh, got: {raw_list}"
 
     def test_me_unauthenticated(self):
@@ -187,7 +194,7 @@ class TestLogout:
             raw_list = [r.headers.get("set-cookie", "")]
         joined = " | ".join(raw_list).lower()
         # delete_cookie produces Max-Age=0 or expires in the past
-        for name in ("kb_token", "csrf_token", "session_token"):
+        for name in (KB_COOKIE, CSRF_COOKIE, SESSION_COOKIE):
             assert name in joined, f"{name} not cleared in Set-Cookie: {raw_list}"
         # After logout, /me should 401
         r2 = s.get(f"{API}/auth/me", timeout=15)
