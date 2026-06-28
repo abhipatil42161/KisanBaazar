@@ -21,11 +21,15 @@ CREDS = {
 
 def _login(role):
     email, pw = CREDS[role]
-    r = requests.post(f"{API}/auth/login", json={"email": email, "password": pw}, timeout=15)
+    s = requests.Session()
+    r = s.post(f"{API}/auth/login", json={"email": email, "password": pw}, timeout=15)
     assert r.status_code == 200, f"login {role} failed: {r.status_code} {r.text}"
     data = r.json()
-    assert "token" in data and "user" in data
-    return data["token"], data["user"]
+    assert "user" in data and "csrf_token" in data
+    # Phase C: JWT lives in httpOnly kb_token cookie; return it for Bearer-compat tests
+    token = s.cookies.get("kb_token")
+    assert token, "kb_token cookie missing"
+    return token, data["user"], s
 
 
 @pytest.fixture(scope="module")
@@ -50,20 +54,20 @@ def _h(token):
 # --- AUTH ---
 class TestAuth:
     def test_farmer_login(self, farmer_auth):
-        token, user = farmer_auth
+        token, user, _ = farmer_auth
         assert user["role"] == "farmer"
         assert len(token) > 0
 
     def test_buyer_login(self, buyer_auth):
-        token, user = buyer_auth
+        token, user, _ = buyer_auth
         assert user["role"] == "buyer"
 
     def test_admin_login(self, admin_auth):
-        token, user = admin_auth
+        token, user, _ = admin_auth
         assert user["role"] == "admin"
 
     def test_auth_me_farmer(self, farmer_auth):
-        token, _ = farmer_auth
+        token, _, _ = farmer_auth
         r = requests.get(f"{API}/auth/me", headers=_h(token), timeout=15)
         assert r.status_code == 200
         assert r.json()["email"] == CREDS["farmer"][0]
@@ -76,7 +80,7 @@ class TestAuth:
 # --- DASHBOARD DATA (used by useFarmerData hook) ---
 class TestFarmerDashboardData:
     def test_get_dashboard_stats(self, farmer_auth):
-        token, _ = farmer_auth
+        token, _, _ = farmer_auth
         r = requests.get(f"{API}/dashboard/stats", headers=_h(token), timeout=15)
         assert r.status_code == 200
         data = r.json()
@@ -86,7 +90,7 @@ class TestFarmerDashboardData:
         assert "revenue" in data
 
     def test_get_products(self, farmer_auth):
-        token, _ = farmer_auth
+        token, _, _ = farmer_auth
         r = requests.get(f"{API}/products", headers=_h(token), timeout=15)
         assert r.status_code == 200
         data = r.json()
@@ -98,19 +102,19 @@ class TestFarmerDashboardData:
             assert k in p, f"missing key {k}"
 
     def test_products_filter_by_farmer(self, farmer_auth):
-        token, user = farmer_auth
+        token, user, _ = farmer_auth
         r = requests.get(f"{API}/products", headers=_h(token), timeout=15)
         owned = [p for p in r.json() if p["farmer_id"] == user["user_id"]]
         assert len(owned) > 0, "farmer should have seeded listings"
 
     def test_get_orders(self, farmer_auth):
-        token, _ = farmer_auth
+        token, _, _ = farmer_auth
         r = requests.get(f"{API}/orders", headers=_h(token), timeout=15)
         assert r.status_code == 200
         assert isinstance(r.json(), list)
 
     def test_get_categories(self, farmer_auth):
-        token, _ = farmer_auth
+        token, _, _ = farmer_auth
         r = requests.get(f"{API}/categories", headers=_h(token), timeout=15)
         assert r.status_code == 200
         cats = r.json()
@@ -121,7 +125,7 @@ class TestFarmerDashboardData:
 # --- PRODUCT CRUD (AddProductDialog + delete) ---
 class TestProductCRUD:
     def test_create_and_delete_product(self, farmer_auth):
-        token, user = farmer_auth
+        token, user, _ = farmer_auth
         payload = {
             "title": f"TEST_Tomatoes_{uuid.uuid4().hex[:6]}",
             "description": "Regression test product",
@@ -162,7 +166,7 @@ class TestProductCRUD:
 # --- AI PRICE PREDICT ---
 class TestAIPricePredict:
     def test_ai_price_predict_called(self, farmer_auth):
-        token, _ = farmer_auth
+        token, _, _ = farmer_auth
         r = requests.post(
             f"{API}/ai/price-predict",
             headers=_h(token),
@@ -178,11 +182,11 @@ class TestAIPricePredict:
 # --- BUYER & ADMIN sanity ---
 class TestRoleSanity:
     def test_buyer_orders_endpoint(self, buyer_auth):
-        token, _ = buyer_auth
+        token, _, _ = buyer_auth
         r = requests.get(f"{API}/orders", headers=_h(token), timeout=15)
         assert r.status_code == 200
 
     def test_admin_orders_endpoint(self, admin_auth):
-        token, _ = admin_auth
+        token, _, _ = admin_auth
         r = requests.get(f"{API}/orders", headers=_h(token), timeout=15)
         assert r.status_code == 200

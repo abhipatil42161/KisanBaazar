@@ -1,12 +1,13 @@
 """KisanBaazar - Agriculture Marketplace Backend."""
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, Cookie
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import uuid
+import secrets
 import bcrypt
 import jwt as pyjwt
 import httpx
@@ -24,6 +25,7 @@ MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 EMERGENT_LLM_KEY = os.environ["EMERGENT_LLM_KEY"]
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "*")
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -33,6 +35,40 @@ api = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+# ------------------ Cookie / CSRF constants ------------------
+AUTH_COOKIE = "kb_token"
+SESSION_COOKIE = "session_token"  # legacy Emergent Google session token
+CSRF_COOKIE = "csrf_token"
+CSRF_HEADER = "X-CSRF-Token"
+COOKIE_MAX_AGE = 7 * 24 * 3600  # 7 days
+# CSRF is exempt for unauthenticated bootstrap endpoints and SSE streaming
+CSRF_EXEMPT_PATHS = {
+    "/api/auth/login",
+    "/api/auth/register",
+    "/api/auth/google/session",
+    "/api/auth/csrf",
+}
+
+
+def _set_auth_cookies(response: Response, jwt_token: str, csrf_value: Optional[str] = None) -> str:
+    """Set httpOnly JWT cookie + readable CSRF cookie. Returns the CSRF value used."""
+    csrf_value = csrf_value or secrets.token_urlsafe(32)
+    response.set_cookie(
+        AUTH_COOKIE, jwt_token,
+        httponly=True, secure=True, samesite="lax", path="/", max_age=COOKIE_MAX_AGE,
+    )
+    response.set_cookie(
+        CSRF_COOKIE, csrf_value,
+        httponly=False, secure=True, samesite="lax", path="/", max_age=COOKIE_MAX_AGE,
+    )
+    return csrf_value
+
+
+def _clear_auth_cookies(response: Response) -> None:
+    response.delete_cookie(AUTH_COOKIE, path="/")
+    response.delete_cookie(CSRF_COOKIE, path="/")
+    response.delete_cookie(SESSION_COOKIE, path="/")
 
 
 # ------------------ Models ------------------
@@ -73,7 +109,7 @@ class Product(BaseModel):
     category: str
     price: float
     unit: str = "kg"
-    moq: int = 1  # minimum order quantity
+    moq: int = 1
     available_qty: int
     quality_grade: Literal["A", "B", "C", "Export"] = "A"
     organic: bool = False
@@ -170,17 +206,15 @@ def public_user(doc: dict) -> dict:
     return {k: v for k, v in doc.items() if k not in ("password", "_id")}
 
 
-def _user_id_from_jwt(bearer: str) -> tuple[Optional[str], Optional[str]]:
-    """Return (user_id, fallback_session_token). Decodes JWT; on failure treats bearer as session token."""
+def _user_id_from_jwt(token: str) -> Optional[str]:
     try:
-        payload = pyjwt.decode(bearer, JWT_SECRET, algorithms=["HS256"])
-        return payload.get("user_id"), None
+        payload = pyjwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return payload.get("user_id")
     except Exception:
-        return None, bearer
+        return None
 
 
 async def _user_id_from_session(token: str) -> Optional[str]:
-    """Look up a session token in MongoDB; return user_id if valid and unexpired."""
     sess = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
     if not sess:
         return None
@@ -196,20 +230,25 @@ async def _user_id_from_session(token: str) -> Optional[str]:
 
 async def get_current_user(
     request: Request,
+    kb_token: Optional[str] = Cookie(None),
     session_token: Optional[str] = Cookie(None),
 ) -> User:
+    """Resolve the current user. Priority: httpOnly JWT cookie → Google session cookie → Authorization Bearer (legacy)."""
     user_id: Optional[str] = None
-    token: Optional[str] = session_token
 
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        bearer = auth.split(" ", 1)[1]
-        user_id, fallback_token = _user_id_from_jwt(bearer)
-        if fallback_token:
-            token = fallback_token
+    if kb_token:
+        user_id = _user_id_from_jwt(kb_token)
 
-    if not user_id and token:
-        user_id = await _user_id_from_session(token)
+    if not user_id and session_token:
+        user_id = await _user_id_from_session(session_token)
+
+    if not user_id:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            bearer = auth.split(" ", 1)[1]
+            user_id = _user_id_from_jwt(bearer)
+            if not user_id:
+                user_id = await _user_id_from_session(bearer)
 
     if not user_id:
         raise HTTPException(401, "Not authenticated")
@@ -220,16 +259,36 @@ async def get_current_user(
     return User(**user_doc)
 
 
-async def optional_user(request: Request, session_token: Optional[str] = Cookie(None)) -> Optional[User]:
+async def optional_user(
+    request: Request,
+    kb_token: Optional[str] = Cookie(None),
+    session_token: Optional[str] = Cookie(None),
+) -> Optional[User]:
     try:
-        return await get_current_user(request, session_token)
+        return await get_current_user(request, kb_token=kb_token, session_token=session_token)
     except HTTPException:
         return None
 
 
+# ------------------ CSRF middleware ------------------
+@app.middleware("http")
+async def csrf_middleware(request: Request, call_next):
+    """Double-submit CSRF: header must equal cookie on state-changing requests when authenticated."""
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        path = request.url.path
+        if path not in CSRF_EXEMPT_PATHS and path.startswith("/api/"):
+            has_auth_cookie = request.cookies.get(AUTH_COOKIE) or request.cookies.get(SESSION_COOKIE)
+            if has_auth_cookie:
+                csrf_cookie = request.cookies.get(CSRF_COOKIE)
+                csrf_header = request.headers.get(CSRF_HEADER)
+                if not csrf_cookie or not csrf_header or not secrets.compare_digest(csrf_cookie, csrf_header):
+                    return JSONResponse(status_code=403, content={"detail": "CSRF token missing or invalid"})
+    return await call_next(request)
+
+
 # ------------------ Auth Routes ------------------
 @api.post("/auth/register")
-async def register(req: RegisterReq):
+async def register(req: RegisterReq, response: Response):
     existing = await db.users.find_one({"email": req.email}, {"_id": 0})
     if existing:
         raise HTTPException(400, "Email already registered")
@@ -248,34 +307,54 @@ async def register(req: RegisterReq):
     }
     await db.users.insert_one(doc)
     token = make_jwt(user_id)
-    return {"token": token, "user": {k: v for k, v in doc.items() if k not in ("password", "_id")}}
+    csrf = _set_auth_cookies(response, token)
+    return {"user": public_user(doc), "csrf_token": csrf}
 
 
 @api.post("/auth/login")
-async def login(req: LoginReq):
+async def login(req: LoginReq, response: Response):
     user = await db.users.find_one({"email": req.email}, {"_id": 0})
     if not user or "password" not in user or not verify_pw(req.password, user["password"]):
         raise HTTPException(401, "Invalid credentials")
     token = make_jwt(user["user_id"])
-    return {"token": token, "user": {k: v for k, v in user.items() if k != "password"}}
+    csrf = _set_auth_cookies(response, token)
+    return {"user": public_user(user), "csrf_token": csrf}
 
 
 @api.get("/auth/me")
-async def me(user: User = Depends(get_current_user)):
+async def me(response: Response, user: User = Depends(get_current_user), csrf_token: Optional[str] = Cookie(None)):
+    # Ensure CSRF cookie exists for any authenticated session (covers legacy logins)
+    if not csrf_token:
+        new_csrf = secrets.token_urlsafe(32)
+        response.set_cookie(
+            CSRF_COOKIE, new_csrf,
+            httponly=False, secure=True, samesite="lax", path="/", max_age=COOKIE_MAX_AGE,
+        )
     return user
+
+
+@api.post("/auth/csrf")
+async def issue_csrf(response: Response):
+    """Issue (or rotate) a CSRF token. Safe to call before login as well."""
+    csrf = secrets.token_urlsafe(32)
+    response.set_cookie(
+        CSRF_COOKIE, csrf,
+        httponly=False, secure=True, samesite="lax", path="/", max_age=COOKIE_MAX_AGE,
+    )
+    return {"csrf_token": csrf}
 
 
 @api.post("/auth/logout")
 async def logout(response: Response, session_token: Optional[str] = Cookie(None)):
     if session_token:
         await db.user_sessions.delete_one({"session_token": session_token})
-    response.delete_cookie("session_token", path="/")
+    _clear_auth_cookies(response)
     return {"ok": True}
 
 
 @api.post("/auth/google/session")
 async def google_session(request: Request, response: Response):
-    """Exchange Emergent session_id for our session_token cookie."""
+    """Exchange Emergent session_id for our session_token cookie + CSRF cookie."""
     session_id = request.headers.get("X-Session-ID")
     if not session_id:
         raise HTTPException(400, "Missing session_id")
@@ -292,7 +371,6 @@ async def google_session(request: Request, response: Response):
     picture = data.get("picture")
     session_token = data["session_token"]
 
-    # find or create user
     user = await db.users.find_one({"email": email}, {"_id": 0})
     if not user:
         user_id = f"user_{uuid.uuid4().hex[:12]}"
@@ -318,10 +396,15 @@ async def google_session(request: Request, response: Response):
         }
     )
     response.set_cookie(
-        "session_token", session_token, httponly=True, secure=True, samesite="none", path="/",
-        max_age=7 * 24 * 3600,
+        SESSION_COOKIE, session_token, httponly=True, secure=True, samesite="none", path="/",
+        max_age=COOKIE_MAX_AGE,
     )
-    return {"user": public_user(user), "token": session_token}
+    csrf = secrets.token_urlsafe(32)
+    response.set_cookie(
+        CSRF_COOKIE, csrf, httponly=False, secure=True, samesite="none", path="/",
+        max_age=COOKIE_MAX_AGE,
+    )
+    return {"user": public_user(user), "csrf_token": csrf}
 
 
 # ------------------ Products ------------------
@@ -444,7 +527,7 @@ async def bid(pid: str, req: BidReq, user: User = Depends(get_current_user)):
 async def create_order(req: OrderCreate, user: User = Depends(get_current_user)):
     total = sum(it.qty * it.price for it in req.items)
     oid = f"ord_{uuid.uuid4().hex[:10]}"
-    rzp_id = f"order_mock_{uuid.uuid4().hex[:14]}"  # MOCK Razorpay
+    rzp_id = f"order_mock_{uuid.uuid4().hex[:14]}"
     doc = {
         "order_id": oid,
         "buyer_id": user.user_id,
@@ -465,7 +548,6 @@ async def create_order(req: OrderCreate, user: User = Depends(get_current_user))
 
 @api.post("/orders/{oid}/pay")
 async def mock_pay(oid: str, user: User = Depends(get_current_user)):
-    """MOCK Razorpay payment confirmation."""
     order = await db.orders.find_one({"order_id": oid}, {"_id": 0})
     if not order:
         raise HTTPException(404, "Not found")
@@ -485,7 +567,6 @@ async def list_orders(user: User = Depends(get_current_user)):
     if user.role == "admin":
         docs = await db.orders.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
     elif user.role == "farmer":
-        # Orders that contain this farmer's products
         prods = await db.products.find({"farmer_id": user.user_id}, {"_id": 0, "product_id": 1}).to_list(500)
         pids = [p["product_id"] for p in prods]
         docs = await db.orders.find({"items.product_id": {"$in": pids}}, {"_id": 0}).sort("created_at", -1).to_list(500)
@@ -516,7 +597,6 @@ async def stats(user: User = Depends(get_current_user)):
             "orders": await db.orders.count_documents({}),
             "revenue": sum([o["total"] async for o in db.orders.find({"payment_status": "paid"}, {"_id": 0, "total": 1})]),
         }
-    # buyer
     orders = await db.orders.count_documents({"buyer_id": user.user_id})
     wishlist = await db.wishlist.count_documents({"user_id": user.user_id})
     return {"orders": orders, "wishlist": wishlist}
@@ -578,7 +658,6 @@ async def ai_chat(req: ChatReq, user: Optional[User] = Depends(optional_user)):
         except Exception as e:
             logger.exception("AI error")
             yield f"\n[error: {e}]"
-        # persist
         await db.chat_messages.insert_one(
             {
                 "session_id": sid,
@@ -626,13 +705,30 @@ async def root():
 
 
 app.include_router(api)
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+# CORS — must use explicit origin when allow_credentials is True
+_cors_origins_env = os.environ.get("CORS_ORIGINS", "")
+_cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip() and o.strip() != "*"]
+if FRONTEND_URL and FRONTEND_URL != "*" and FRONTEND_URL not in _cors_origins:
+    _cors_origins.append(FRONTEND_URL)
+# Fallback: if no explicit origin configured, do NOT enable credentials with wildcard
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_credentials=True,
+        allow_origins=_cors_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["X-Session-Id"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_credentials=False,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 @app.on_event("shutdown")

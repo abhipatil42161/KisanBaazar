@@ -1,0 +1,65 @@
+{
+  "summary": "Phase C security migration (JWT-in-httpOnly-cookie + double-submit CSRF) validated end-to-end. Backend: 37/37 pytest (23 new CSRF+cookie tests + 14 updated farmer regression). Frontend E2E: farmer login -> kb_token (httpOnly) & csrf_token (readable) cookies set, NO JWT in body, NO JWT in localStorage, AddProductDialog POST /api/products succeeds via axios CSRF interceptor, AI Predict POST works, product persisted in DB and rendered in listings; logout via user-menu cleared all auth cookies and /api/auth/me returns 401; buyer regression (wishlist POST) also succeeds with CSRF header. Zero CSRF 403s observed during entire UI flow.",
+  "tested_scope": ["backend", "frontend", "integration", "auth-security"],
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "passed": [
+    "POST /api/auth/login -> 200, body has {user, csrf_token} only (NO 'token' field), Set-Cookie has kb_token (HttpOnly+Secure+SameSite=Lax) and csrf_token (Secure+SameSite=Lax, NOT HttpOnly)",
+    "POST /api/auth/register -> same cookie + body shape as login (no JWT)",
+    "GET /api/auth/me -> works with cookie only (no Authorization header), returns user",
+    "GET /api/auth/me with kb_token but no csrf_token cookie -> re-issues csrf_token via Set-Cookie (legacy session migration)",
+    "GET /api/auth/me unauthenticated -> 401",
+    "POST /api/auth/csrf unauthenticated -> 200 with new csrf_token cookie + body",
+    "POST /api/auth/csrf authenticated -> rotates csrf_token, returns new value",
+    "POST /api/auth/logout (with CSRF header) -> 200, clears kb_token, csrf_token, session_token via Set-Cookie",
+    "CSRF middleware: POST /api/products with kb_token cookie and NO X-CSRF-Token header -> 403 {detail: 'CSRF token missing or invalid'}",
+    "CSRF middleware: POST /api/products with WRONG X-CSRF-Token -> 403",
+    "CSRF middleware: POST /api/products with CORRECT X-CSRF-Token (matching cookie) -> 200/201, product persisted",
+    "CSRF middleware: unauthenticated POST /api/products -> 401 (NOT 403; CSRF skipped when no auth cookie)",
+    "Backward compat: Authorization: Bearer <jwt> (extracted from kb_token cookie) still works on /api/auth/me and /api/dashboard/stats",
+    "POST /api/auth/google/session without X-Session-ID -> 400 (smoke)",
+    "Regression via cookies: /api/products list, /api/categories, /api/dashboard/stats (farmer), /api/orders (buyer & admin), wishlist round-trip, AI price-predict",
+    "Frontend E2E: farmer login redirected to /dashboard/farmer; document.cookie contains 'csrf_token=' but NOT 'kb_token='; cookie meta confirms kb_token.httpOnly=true, csrf_token.httpOnly=false",
+    "Frontend E2E: localStorage.getItem('kb_token') and 'token' both null -- no JWT stored client-side",
+    "Frontend E2E: AddProductDialog open -> AI Predict button POST /api/ai/price-predict returns text (toast displayed) -> form submit creates product (POST /api/products) -> product visible in listings -- proves axios request interceptor auto-attaches X-CSRF-Token (zero 403s observed)",
+    "Frontend E2E: user-menu-btn dropdown -> Logout -> all auth cookies cleared; /api/auth/me returns 401",
+    "Frontend E2E: buyer login -> cookie shape OK -> wishlist POST /api/wishlist/{pid} returns 200 with CSRF header"
+  ],
+  "failed": [],
+  "test_report_links": [
+    "/app/backend/tests/test_csrf_cookie_auth.py",
+    "/app/backend/tests/test_farmer_regression.py",
+    "/app/test_reports/pytest/iteration_9.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Cookie security: kb_token correctly Secure+HttpOnly+SameSite=Lax; csrf_token Secure+SameSite=Lax+JS-readable. Production-ready.",
+    "CSRF middleware uses secrets.compare_digest for timing-safe comparison -- good.",
+    "CSRF middleware skip when no auth cookie is correct (returns 401 from dep instead of 403), avoids confusing unauthenticated clients.",
+    "CSRF exempt paths are minimal and correct (login/register/google/csrf-bootstrap).",
+    "POSSIBLE GAP: SSE streaming endpoint /api/ai/chat is a POST -> if user is logged-in and frontend forgets CSRF header, middleware will 403 it. Verified the axios interceptor adds the header for POST so works in practice; just worth keeping in mind for any non-axios stream client.",
+    "POSSIBLE GAP: /api/auth/csrf is exempt from CSRF check. That is intentional (bootstrap), but ensure rate-limiting at gateway since an attacker with a stolen kb_token could rotate CSRF freely. Low priority.",
+    "Google OAuth session cookie uses SameSite=None (required for cross-site redirect). Combined with Secure=true this is acceptable. Note: csrf_token for google session is also SameSite=None which is fine for the OAuth path.",
+    "axios interceptor: readCookie regex correctly URL-decodes; CSRF auto-retry on 403 is a nice UX safety net.",
+    "Frontend AuthContext no longer touches localStorage -- verified at runtime (localStorage.kb_token == null).",
+    "Pre-existing (not Phase-C related): Radix DialogContent aria-describedby a11y warnings persist."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_csrf_cookie_auth.py (new -- 23 tests)",
+    "/app/backend/tests/test_farmer_regression.py (updated _login helper + tuple destructuring for cookie-based auth; no business-logic changes)"
+  ],
+  "success_rate": {"backend": "100% (37/37)", "frontend": "100% (all critical Phase C flows + buyer regression)"},
+  "test_credentials": "Farmer: farmer@kisanbaazar.in/farmer123, Buyer: buyer@kisanbaazar.in/buyer123, Admin: admin@kisanbaazar.in/admin123 (from /app/memory/test_credentials.md). bcrypt hashes verified ($2b$ format used in seed).",
+  "seed_data_creation": "None. One E2E test product (E2E_CSRF_Tomato) created during UI run was cleaned up post-test via cookie-auth DELETE.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Phase C security migration fully passed. The cookie-aware test suite at /app/backend/tests/test_csrf_cookie_auth.py is the canonical regression for auth/CSRF; reuse for any future auth refactor. /app/backend/tests/test_farmer_regression.py was updated to use cookies (kb_token from Set-Cookie) so it still uses the Bearer-compat path -- both forms (cookie session and Bearer header) are tested. Frontend testids used: login-email/login-password are NOT defined (uses input[type=email/password] + button[type=submit]); user-menu-btn opens dropdown with Logout; product testids are listing-prod_{id} and del-prod_{id}; AddProductDialog has form-title/form-desc/form-category/form-price/form-qty/form-location/form-state/form-submit + ai-predict-btn.",
+  "rca of the issue": "N/A -- no defects found."
+}

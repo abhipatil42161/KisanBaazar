@@ -17,8 +17,7 @@ export default function AuthCallback() {
     if (!m) { setError("Missing session"); return; }
     const sessionId = m[1];
     api.post("/auth/google/session", null, { headers: { "X-Session-ID": sessionId } })
-      .then(async ({ data }) => {
-        localStorage.setItem("kb_token", data.token);
+      .then(async () => {
         await refresh();
         nav("/dashboard/buyer", { replace: true });
       })

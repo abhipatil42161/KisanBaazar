@@ -20,11 +20,8 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   useEffect(() => {
+    // OAuth redirect: AuthCallback handles its own refresh; skip eager me() here
     if (window.location.hash?.includes("session_id=")) {
-      setLoading(false);
-      return;
-    }
-    if (!localStorage.getItem("kb_token")) {
       setLoading(false);
       return;
     }
@@ -33,14 +30,12 @@ export const AuthProvider = ({ children }) => {
 
   const login = useCallback(async (email, password) => {
     const { data } = await api.post("/auth/login", { email, password });
-    localStorage.setItem("kb_token", data.token);
     setUser(data.user);
     return data.user;
   }, []);
 
   const register = useCallback(async (payload) => {
     const { data } = await api.post("/auth/register", payload);
-    localStorage.setItem("kb_token", data.token);
     setUser(data.user);
     return data.user;
   }, []);
@@ -51,7 +46,6 @@ export const AuthProvider = ({ children }) => {
     } catch {
       // Logout failures are non-fatal; client-side cleanup proceeds.
     }
-    localStorage.removeItem("kb_token");
     setUser(null);
   }, []);
 
