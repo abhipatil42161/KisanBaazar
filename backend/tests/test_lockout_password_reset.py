@@ -27,7 +27,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://kisan-baazar.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ["REACT_APP_BACKEND_URL"].rstrip("/")
 API = f"{BASE_URL}/api"
 # Local backend socket — used for lockout tests so the source IP is stable.
 # (Public URL goes through Cloudflare which may rotate X-Forwarded-For across pops,
@@ -366,10 +366,11 @@ class TestMongoIndexes:
 # 5) Cookie+CSRF regression (smoke)
 # ============================================================
 class TestCsrfRegression:
-    def test_login_still_sets_kb_and_csrf(self):
+    def test_login_still_sets_kb_and_csrf(self, test_creds):
+        email, pw = test_creds["farmer"]
         s = requests.Session()
         r = s.post(f"{API}/auth/login",
-                   json={"email": "farmer@kisanbaazar.in", "password": "farmer123"}, timeout=15)
+                   json={"email": email, "password": pw}, timeout=15)
         assert r.status_code == 200, r.text
         assert s.cookies.get("kb_token")
         assert s.cookies.get("csrf_token")
@@ -377,10 +378,11 @@ class TestCsrfRegression:
         assert "token" not in body
         assert "csrf_token" in body
 
-    def test_post_products_without_csrf_403_with_csrf_2xx(self):
+    def test_post_products_without_csrf_403_with_csrf_2xx(self, test_creds):
+        email, pw = test_creds["farmer"]
         s = requests.Session()
         r = s.post(f"{API}/auth/login",
-                   json={"email": "farmer@kisanbaazar.in", "password": "farmer123"}, timeout=15)
+                   json={"email": email, "password": pw}, timeout=15)
         assert r.status_code == 200
         sample = {
             "title": f"TEST_lockout_csrf_{uuid.uuid4().hex[:6]}",

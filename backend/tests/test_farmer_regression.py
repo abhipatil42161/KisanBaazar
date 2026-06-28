@@ -9,18 +9,12 @@ import uuid
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://kisan-baazar.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ["REACT_APP_BACKEND_URL"].rstrip("/")
 API = f"{BASE_URL}/api"
 
-CREDS = {
-    "farmer": ("farmer@kisanbaazar.in", "farmer123"),
-    "buyer":  ("buyer@kisanbaazar.in",  "buyer123"),
-    "admin":  ("admin@kisanbaazar.in",  "admin123"),
-}
 
-
-def _login(role):
-    email, pw = CREDS[role]
+def _login(role, creds):
+    email, pw = creds[role]
     s = requests.Session()
     r = s.post(f"{API}/auth/login", json={"email": email, "password": pw}, timeout=15)
     assert r.status_code == 200, f"login {role} failed: {r.status_code} {r.text}"
@@ -33,18 +27,18 @@ def _login(role):
 
 
 @pytest.fixture(scope="module")
-def farmer_auth():
-    return _login("farmer")
+def farmer_auth(test_creds):
+    return _login("farmer", test_creds)
 
 
 @pytest.fixture(scope="module")
-def buyer_auth():
-    return _login("buyer")
+def buyer_auth(test_creds):
+    return _login("buyer", test_creds)
 
 
 @pytest.fixture(scope="module")
-def admin_auth():
-    return _login("admin")
+def admin_auth(test_creds):
+    return _login("admin", test_creds)
 
 
 def _h(token):
@@ -66,14 +60,15 @@ class TestAuth:
         token, user, _ = admin_auth
         assert user["role"] == "admin"
 
-    def test_auth_me_farmer(self, farmer_auth):
+    def test_auth_me_farmer(self, farmer_auth, test_creds):
         token, _, _ = farmer_auth
         r = requests.get(f"{API}/auth/me", headers=_h(token), timeout=15)
         assert r.status_code == 200
-        assert r.json()["email"] == CREDS["farmer"][0]
+        assert r.json()["email"] == test_creds["farmer"][0]
 
-    def test_invalid_login(self):
-        r = requests.post(f"{API}/auth/login", json={"email": "farmer@kisanbaazar.in", "password": "wrong"}, timeout=15)
+    def test_invalid_login(self, test_creds):
+        farmer_email = test_creds["farmer"][0]
+        r = requests.post(f"{API}/auth/login", json={"email": farmer_email, "password": "wrong"}, timeout=15)
         assert r.status_code in (400, 401, 403)
 
 
