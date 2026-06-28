@@ -48,12 +48,8 @@ export const AuthProvider = ({ children }) => {
   const logout = useCallback(async () => {
     try {
       await api.post("/auth/logout");
-    } catch (err) {
-      // Logout failures are non-fatal; client-side cleanup still proceeds.
-      if (process.env.NODE_ENV !== "production") {
-        // eslint-disable-next-line no-console
-        console.warn("Logout request failed:", err?.message);
-      }
+    } catch {
+      // Logout failures are non-fatal; client-side cleanup proceeds.
     }
     localStorage.removeItem("kb_token");
     setUser(null);

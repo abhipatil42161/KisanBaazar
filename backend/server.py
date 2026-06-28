@@ -481,6 +481,7 @@ async def mock_pay(oid: str, user: User = Depends(get_current_user)):
 
 @api.get("/orders")
 async def list_orders(user: User = Depends(get_current_user)):
+    docs: list = []
     if user.role == "admin":
         docs = await db.orders.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
     elif user.role == "farmer":
