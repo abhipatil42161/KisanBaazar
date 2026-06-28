@@ -2,22 +2,24 @@
 import asyncio
 import os
 import uuid
-import bcrypt
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
+
+import bcrypt
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 
 load_dotenv(Path(__file__).parent.parent / ".env")
-client = AsyncIOMotorClient(os.environ["MONGO_URL"])
+client: AsyncIOMotorClient = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = client[os.environ["DB_NAME"]]
 
 
-def now():
+def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-DEMO_FARMER = {
+DEMO_FARMER: dict[str, Any] = {
     "user_id": "user_demofarmer01",
     "email": "farmer@kisanbaazar.in",
     "password": bcrypt.hashpw(b"farmer123", bcrypt.gensalt()).decode(),
@@ -30,7 +32,7 @@ DEMO_FARMER = {
     "created_at": now(),
 }
 
-DEMO_BUYER = {
+DEMO_BUYER: dict[str, Any] = {
     "user_id": "user_demobuyer01",
     "email": "buyer@kisanbaazar.in",
     "password": bcrypt.hashpw(b"buyer123", bcrypt.gensalt()).decode(),
@@ -43,7 +45,7 @@ DEMO_BUYER = {
     "created_at": now(),
 }
 
-DEMO_ADMIN = {
+DEMO_ADMIN: dict[str, Any] = {
     "user_id": "user_demoadmin01",
     "email": "admin@kisanbaazar.in",
     "password": bcrypt.hashpw(b"admin123", bcrypt.gensalt()).decode(),
@@ -53,7 +55,7 @@ DEMO_ADMIN = {
     "created_at": now(),
 }
 
-PRODUCTS = [
+PRODUCTS: list[dict[str, Any]] = [
     {"title": "Premium Alphonso Mangoes", "description": "GI-tagged Ratnagiri Alphonso, hand-picked at peak ripeness. Naturally ripened, no carbide.",
      "category": "fruits", "price": 850, "unit": "dozen", "moq": 2, "available_qty": 500,
      "quality_grade": "Export", "organic": True, "export_ready": True,
@@ -118,14 +120,14 @@ PRODUCTS = [
 ]
 
 
-async def main():
+async def main() -> None:
     await db.users.delete_many({"email": {"$in": [DEMO_FARMER["email"], DEMO_BUYER["email"], DEMO_ADMIN["email"]]}})
     await db.users.insert_many([DEMO_FARMER, DEMO_BUYER, DEMO_ADMIN])
 
     await db.products.delete_many({"farmer_id": DEMO_FARMER["user_id"]})
-    docs = []
+    docs: list[dict[str, Any]] = []
     for p in PRODUCTS:
-        doc = {
+        doc: dict[str, Any] = {
             "product_id": f"prod_{uuid.uuid4().hex[:10]}",
             "farmer_id": DEMO_FARMER["user_id"],
             "farmer_name": DEMO_FARMER["name"],

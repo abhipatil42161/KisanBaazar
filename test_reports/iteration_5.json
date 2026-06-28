@@ -1,0 +1,17 @@
+{
+  "summary": "Iteration 5 regression smoke after type hint additions to /app/backend/seed/seed_data.py. All three demo logins return 200 with valid JWT and correct user role, GET /api/products returns 200 with 12 seeded products, and frontend home page renders hero, branding, and product cards with no console/page errors. No behavioral regression.",
+  "tested_scope": ["backend", "frontend", "auth", "integration"],
+  "passed": [
+    "POST /api/auth/login farmer@kisanbaazar.in/farmer123 -> 200 (role=farmer, user_id=user_demofarmer01)",
+    "POST /api/auth/login buyer@kisanbaazar.in/buyer123 -> 200 (role=buyer, user_id=user_demobuyer01)",
+    "POST /api/auth/login admin@kisanbaazar.in/admin123 -> 200 (role=admin, verified=true)",
+    "GET /api/products -> 200 returns list with 12 products",
+    "Frontend home page loads (https://kisan-baazar.preview.emergentagent.com): hero 'Farm to World — Direct.' visible, KisanBaazar branding, 9 product[data-testid] elements, no .error elements on page"
+  ],
+  "failed": [],
+  "action_items": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "retest_needed": false,
+  "full_testing_deferred": true,
+  "notes": "Razorpay /api/orders/{id}/pay remains MOCKED per problem statement; not exercised in this smoke pass."
+}
