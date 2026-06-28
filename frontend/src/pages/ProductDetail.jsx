@@ -19,7 +19,10 @@ export default function ProductDetail() {
   const { add } = useCart();
   const { user } = useAuth();
 
-  const load = useCallback(() => api.get(`/products/${id}`).then((r) => { setP(r.data); setQty(r.data.moq || 1); }), [id]);
+  const load = useCallback(
+    () => api.get(`/products/${id}`).then((r) => { setP(r.data); setQty(r.data.moq || 1); }),
+    [id]
+  );
   useEffect(() => { load(); }, [load]);
 
   if (!p) return <div className="max-w-7xl mx-auto p-8">Loading…</div>;

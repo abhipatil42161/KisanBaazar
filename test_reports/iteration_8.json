@@ -1,0 +1,57 @@
+{
+  "summary": "Regression verification after FarmerDashboard.jsx refactor (split into FarmerStats/FarmerListings/FarmerOrders/AddProductDialog + useFarmerData hook). Backend: 14/14 pytest cases pass. Frontend: full farmer dashboard E2E covered — login, stats render, listings filter, AddProductDialog with all 16 form testids, product create/list/delete round-trip, AI price-predict network call fired, buyer & admin login sanity. Zero console errors; only pre-existing Radix a11y warnings observed.",
+  "tested_scope": ["backend", "frontend", "integration", "auth"],
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "AddProductDialog (and other dialogs)", "issues": ["Radix `DialogContent` missing `Description` or `aria-describedby` — 4 a11y console warnings. Pre-existing, not introduced by this refactor."]}
+    ]
+  },
+  "passed": [
+    "POST /api/auth/login farmer/buyer/admin → 200 with token+user",
+    "GET /api/auth/me → 200 (farmer)",
+    "Invalid login → 401",
+    "GET /api/dashboard/stats → 200, contains products/orders/revenue keys",
+    "GET /api/products → 200, list with farmer_id field",
+    "Farmer-owned product filter by farmer_id → non-empty (seeded)",
+    "GET /api/orders (farmer/buyer/admin) → 200 each",
+    "GET /api/categories → 200, list with id/name",
+    "POST /api/products → product persisted, retrievable via GET",
+    "DELETE /api/products/{id} → 200/204, item removed from list",
+    "POST /api/ai/price-predict → 200 (or upstream-fallback) with prediction key",
+    "Farmer login UI → /dashboard/farmer with 3 StatCards visible (Active Listings / Orders Received / Total Revenue)",
+    "FarmerListings rendered 13 seeded listings; after AddProductDialog submit count = 14; after delete count back to 13",
+    "AddProductDialog opens; all 16 data-testids present: form-title, form-desc, form-category, form-grade, form-price, ai-predict-btn, form-unit, form-moq, form-qty, form-location, form-state, form-images, form-harvest, form-organic, form-export, form-submit",
+    "AI Predict button fires POST /api/ai/price-predict (verified via request interception)",
+    "Trash-icon delete with window.confirm → product removed from UI",
+    "Buyer login → /dashboard/buyer loads with no console errors",
+    "Admin login → /dashboard/admin loads with no console errors"
+  ],
+  "failed": [],
+  "test_report_links": [
+    "/app/backend/tests/test_farmer_regression.py",
+    "/app/test_reports/pytest/iteration_8.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Refactor is clean. FarmerDashboard.jsx is now 30 lines of pure composition (good).",
+    "useFarmerData hook correctly memoizes `load` on userId and exposes `reload` — matches the contract used by sub-components.",
+    "FarmerListings.remove calls onChange() unconditionally even if api.delete throws (await without try/catch). Minor: a failed delete would still trigger a refetch & success toast. Low priority; not a regression.",
+    "AddProductDialog.aiPredict catches but swallows error to a generic toast — fine for UX. No regression.",
+    "Pre-existing: Radix DialogContent missing aria-describedby — produces 4 console warnings across dialogs (not a regression but worth fixing for a11y)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_farmer_regression.py (new)"
+  ],
+  "success_rate": {"backend": "100% (14/14)", "frontend": "100%"},
+  "test_credentials": "Farmer: farmer@kisanbaazar.in/farmer123, Buyer: buyer@kisanbaazar.in/buyer123, Admin: admin@kisanbaazar.in/admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "None. Used existing idempotent seed. Test product 'E2E_Tomato_*' was created during UI flow and deleted in the same run, leaving DB clean.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "FarmerDashboard refactor passed full regression. Reusable pytest suite at /app/backend/tests/test_farmer_regression.py covers auth + farmer dashboard data + product CRUD + AI predict. Frontend has full data-testid coverage on AddProductDialog form fields and listing/delete buttons. Admin dashboard shows 0/0/0 stats — pre-existing behaviour (admin stats endpoint may compute differently from /api/dashboard/stats); out of scope for this refactor."
+}
