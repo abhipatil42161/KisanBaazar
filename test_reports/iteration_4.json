@@ -1,0 +1,22 @@
+{
+  "summary": "Iteration 4 (AIChat refactor into 4 files: AIChat.jsx + ChatHeader/MessageList/MessageInput + useChatStream hook). Verified zero behavioral regression. All 3 critical backend endpoints (products, login, ai/chat) return 200 with valid payloads, including full Claude streamed reply. All 6 AIChat E2E flows pass (button visible & positioned correctly, open, send-via-button, Enter-key send, close, floating-button restoration). Farmer login regression passes (dashboard loads).",
+  "tested_scope": ["frontend", "backend", "auth", "integration"],
+  "passed": [
+    "GET /api/products -> 200, 14 seeded products",
+    "POST /api/auth/login farmer -> 200 with token + user",
+    "POST /api/ai/chat -> 200, streamed Claude response (~1.1KB, valid MSP explanation)",
+    "Home page loads, no error elements detected",
+    "AIChat floating button visible at (1277,608) - bottom-24 right-6, no overlap with Emergent badge",
+    "ai-chat-open click opens panel, greeting 'Namaste! I'm your KisanBaazar AI...' visible",
+    "ai-chat-input + ai-chat-send triggers streaming reply (user message 'What is PM-KISAN?' rendered, AI response received)",
+    "Enter-key send works (user msg 'Hi' rendered in chat)",
+    "ai-chat-close closes panel and restores floating button",
+    "Farmer login (farmer@kisanbaazar.in/farmer123) -> /dashboard/farmer with stats (Active Listings, Orders Received, Total Revenue) and List Product CTA"
+  ],
+  "failed": [],
+  "action_items": [],
+  "success_rate": {"backend": "100% (3/3)", "frontend": "100% (8/8 smoke + AIChat E2E)"},
+  "retest_needed": false,
+  "full_testing_deferred": true,
+  "notes": "Buyer login, theme toggle, language switcher, cart-add regression NOT re-executed this iteration since AIChat refactor is isolated and prior iterations (2: 16/16, 3: 10/10) covered them. Razorpay payment remains MOCKED per problem statement."
+}
