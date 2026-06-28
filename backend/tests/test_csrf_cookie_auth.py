@@ -23,21 +23,6 @@ import requests
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://kisan-baazar.preview.emergentagent.com").rstrip("/")
 API = f"{BASE_URL}/api"
 
-CREDS = {
-    "farmer": (
-        os.environ.get("TEST_FARMER_EMAIL", "farmer@kisanbaazar.in"),
-        os.environ.get("TEST_FARMER_PASSWORD", "farmer123"),
-    ),
-    "buyer": (
-        os.environ.get("TEST_BUYER_EMAIL", "buyer@kisanbaazar.in"),
-        os.environ.get("TEST_BUYER_PASSWORD", "buyer123"),
-    ),
-    "admin": (
-        os.environ.get("TEST_ADMIN_EMAIL", "admin@kisanbaazar.in"),
-        os.environ.get("TEST_ADMIN_PASSWORD", "admin123"),
-    ),
-}
-
 # Cookie-name constants (avoid literal "kb_token="/"csrf_token=" snippets in test code)
 KB_COOKIE = "kb_token"
 CSRF_COOKIE = "csrf_token"
@@ -46,10 +31,10 @@ _KB_PREFIX = f"{KB_COOKIE}="
 _CSRF_PREFIX = f"{CSRF_COOKIE}="
 
 
-def _login_session(role: str) -> requests.Session:
+def _login_session(role: str, creds: dict) -> requests.Session:
     """Return a fresh Session that has kb_token + csrf_token cookies set by login."""
     s = requests.Session()
-    email, pw = CREDS[role]
+    email, pw = creds[role]
     r = s.post(f"{API}/auth/login", json={"email": email, "password": pw}, timeout=20)
     assert r.status_code == 200, f"login {role} failed: {r.status_code} {r.text}"
     return s
@@ -62,25 +47,25 @@ def _csrf_headers(session: requests.Session) -> dict:
 
 
 @pytest.fixture(scope="module")
-def farmer_session():
-    return _login_session("farmer")
+def farmer_session(test_creds):
+    return _login_session("farmer", test_creds)
 
 
 @pytest.fixture(scope="module")
-def buyer_session():
-    return _login_session("buyer")
+def buyer_session(test_creds):
+    return _login_session("buyer", test_creds)
 
 
 @pytest.fixture(scope="module")
-def admin_session():
-    return _login_session("admin")
+def admin_session(test_creds):
+    return _login_session("admin", test_creds)
 
 
 # ------------------ Login / Register cookie shape ------------------
 class TestLoginCookies:
-    def test_login_sets_cookies_and_no_jwt_in_body(self):
+    def test_login_sets_cookies_and_no_jwt_in_body(self, test_creds):
         s = requests.Session()
-        email, pw = CREDS["farmer"]
+        email, pw = test_creds["farmer"]
         r = s.post(f"{API}/auth/login", json={"email": email, "password": pw}, timeout=15)
         assert r.status_code == 200
         body = r.json()
@@ -137,21 +122,21 @@ class TestLoginCookies:
 
 # ------------------ /auth/me ------------------
 class TestAuthMe:
-    def test_me_via_cookie(self, farmer_session):
+    def test_me_via_cookie(self, farmer_session, test_creds):
         r = farmer_session.get(f"{API}/auth/me", timeout=15)
         assert r.status_code == 200
-        assert r.json()["email"] == CREDS["farmer"][0]
+        assert r.json()["email"] == test_creds["farmer"][0]
 
-    def test_me_no_auth_header_needed(self):
+    def test_me_no_auth_header_needed(self, test_creds):
         # Cookie-only request, no Authorization header
-        s = _login_session("buyer")
+        s = _login_session("buyer", test_creds)
         r = s.get(f"{API}/auth/me", timeout=15)
         assert r.status_code == 200
         assert r.json()["role"] == "buyer"
 
-    def test_me_refreshes_csrf_if_missing(self):
+    def test_me_refreshes_csrf_if_missing(self, test_creds):
         # Simulate a legacy session: kb_token only, no csrf_token
-        s = _login_session("farmer")
+        s = _login_session("farmer", test_creds)
         kb = s.cookies.get("kb_token")
         s.cookies.clear()
         s.cookies.set("kb_token", kb, domain=re.sub(r"^https?://", "", BASE_URL))
@@ -192,8 +177,8 @@ class TestCsrfEndpoint:
 
 # ------------------ Logout ------------------
 class TestLogout:
-    def test_logout_clears_cookies(self):
-        s = _login_session("buyer")
+    def test_logout_clears_cookies(self, test_creds):
+        s = _login_session("buyer", test_creds)
         headers = _csrf_headers(s)
         r = s.post(f"{API}/auth/logout", headers=headers, timeout=15)
         assert r.status_code == 200
@@ -282,9 +267,9 @@ class TestCsrfMiddleware:
 
 # ------------------ Backward-compat Bearer header ------------------
 class TestBearerBackcompat:
-    def test_bearer_token_from_cookie_works_on_me(self):
+    def test_bearer_token_from_cookie_works_on_me(self, test_creds):
         # Extract JWT from kb_token cookie and use as Authorization Bearer
-        s = _login_session("farmer")
+        s = _login_session("farmer", test_creds)
         kb = s.cookies.get("kb_token")
         assert kb
         # Use a clean requests call with only the Authorization header — no cookies
@@ -294,10 +279,10 @@ class TestBearerBackcompat:
             timeout=15,
         )
         assert r.status_code == 200
-        assert r.json()["email"] == CREDS["farmer"][0]
+        assert r.json()["email"] == test_creds["farmer"][0]
 
-    def test_bearer_token_works_on_protected_endpoint(self):
-        s = _login_session("farmer")
+    def test_bearer_token_works_on_protected_endpoint(self, test_creds):
+        s = _login_session("farmer", test_creds)
         kb = s.cookies.get("kb_token")
         r = requests.get(
             f"{API}/dashboard/stats",

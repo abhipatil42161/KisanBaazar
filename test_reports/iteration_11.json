@@ -1,0 +1,50 @@
+{
+  "summary": "Iteration 11 — Code-quality cleanup verification (regression-safety pass). Verified (1) test_csrf_cookie_auth.py has no hardcoded credential literals — values resolved via `test_creds` fixture in tests/conftest.py loading tests/.env.test via python-dotenv; (2) server.py has zero `is None` / `is not None` occurrences; (3) Frontend has zero direct `console.*` calls outside `/app/frontend/src/lib/logger.js` (the prod-safe wrapper). Backend: 53/53 pytest PASS. Backend product filters (organic/export_ready/auction) all return correctly filtered results. Frontend E2E: home, farmer & buyer login + dashboards, products page organic filter (URL → ?organic=true), forgot-password success panel, reset-password no-token panel, product detail + Add to Cart (header badge 0→1), AI chat streaming response — all green. No regressions detected.",
+  "tested_scope": ["backend", "frontend", "integration", "code-quality"],
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": { "ui_bugs": [], "integration_issues": [], "design_issues": [] },
+  "code_quality_checks": {
+    "hardcoded_creds_in_tests": "PASS — `grep -n 'farmer123|buyer123|admin123' /app/backend/tests/test_csrf_cookie_auth.py` returns ZERO matches. Creds resolved via tests/conftest.py `test_creds` session fixture which loads tests/.env.test through python-dotenv.",
+    "server_is_none_cleanup": "PASS — `grep -n ' is None| is not None' /app/backend/server.py` returns ZERO matches. Product filters use `if organic / if export_ready / if auction`; tzinfo checks use `if not dt.tzinfo`.",
+    "frontend_console_guard": "PASS — `grep -rn 'console\\.(log|warn|error|info|debug)' /app/frontend/src/` returns ONLY two lines, both inside /app/frontend/src/lib/logger.js (the wrapper itself). logger.js gates output behind `process.env.NODE_ENV !== 'production'`, so production bundle no-ops.",
+    "conftest_fixture": "PASS — `test_creds` resolves correctly; all 16 tests in test_csrf_cookie_auth.py that take it as a param pass."
+  },
+  "passed": [
+    "Backend pytest: 53/53 PASS (test_csrf_cookie_auth.py + test_farmer_regression.py + test_lockout_password_reset.py) in 36.6s",
+    "Product filter regression — GET /api/products returns 12 total; ?organic=true returns 5 items, all organic=true; ?export_ready=true returns 7 items, all export_ready=true; ?auction=true returns 1 item, auction=true. Semantics preserved after `is not None` -> truthy switch.",
+    "Frontend: home '/' loads (KisanBaazar landing renders)",
+    "Frontend: POST /api/auth/login with farmer@kisanbaazar.in / farmer123 → redirect to /dashboard/farmer; listings and orders sections render (useFarmerData hook + logger integration intact)",
+    "Frontend: POST /api/auth/login with buyer@kisanbaazar.in / buyer123 → redirect to /dashboard/buyer (fetchBuyerData helper)",
+    "Frontend: /products → click [data-testid=filter-organic] → URL becomes /products?organic=true, product grid refetches (fetchFilteredProducts helper)",
+    "Frontend: /forgot-password → email submit → forgot-sent panel renders (testid forgot-sent visible)",
+    "Frontend: /reset-password without ?token → reset-no-token panel renders",
+    "Frontend: /products/<id> Add-to-Cart button click → header cart badge increments from 0 to 1 (CartContext + logger fallback intact)",
+    "Frontend: AI chat — [data-testid=ai-chat-open] floating button opens chat, [data-testid=ai-chat-input] + [data-testid=ai-chat-send] send a message, AI streams a response in ~10s (AIChat.jsx unaffected by refactor)",
+    "Cookie+CSRF auth: verified by 53/53 pytest including TestCsrfRotation, TestProtectedEndpoint, TestCookieFlags — kb_token HttpOnly, csrf_token readable, missing X-CSRF-Token → 403, valid → 2xx, unauthenticated → 401"
+  ],
+  "failed": [],
+  "test_report_links": [
+    "/app/backend/tests/test_csrf_cookie_auth.py",
+    "/app/backend/tests/test_lockout_password_reset.py",
+    "/app/backend/tests/test_farmer_regression.py",
+    "/app/backend/tests/conftest.py",
+    "/app/backend/tests/.env.test",
+    "/app/test_reports/pytest/iteration_11.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "tests/.env.test is committed to the repo (intentional for local-dev convenience per main agent's note). Recommend adding it to .gitignore in a follow-up commit and providing a .env.test.example sibling so secret scanners are happy in CI/CD.",
+    "logger.js correctly checks `process.env.NODE_ENV !== 'production'` at module-init time (constant `isDev`); CRA bakes NODE_ENV into the bundle at build time, so production builds will tree-shake the dead branch and emit no console calls.",
+    "Filter switch from `if x is not None` to `if x` is safe ONLY because the Pydantic-bound query params can never be the string 'false' (FastAPI coerces ?organic=false to bool False, which falls through the if). Verified: ?organic=true returns 5 organic-only; no false-positive filtering. If a future endpoint accepted a tri-state, this would need to revert.",
+    "test_creds fixture uses `pytest.skip` instead of `pytest.fail` when env vars are missing — appropriate for CI hosts that may legitimately not have role creds (tests just won't run); local dev with .env.test always populates them.",
+    "Two `console.warn`/`console.error` calls inside logger.js are correct (they are the wrapper's actual implementations); the search-and-replace check confirms no stray direct console usage elsewhere in /app/frontend/src/."
+  ],
+  "updated_files": [],
+  "success_rate": { "backend": "100% (53/53 pytest, all product-filter regressions verified)", "frontend": "100% (all 9 spec E2E flows: home, farmer dash, buyer dash, organic filter URL update, forgot-password panel, reset-no-token panel, product detail add-to-cart, AI chat, cart badge increment)" },
+  "test_credentials": "Demo accounts (farmer/buyer/admin) live in /app/backend/tests/.env.test and /app/memory/test_credentials.md — both consistent. Login via password auth works end-to-end through public preview URL.",
+  "seed_data_creation": "None. No persistent data added in this iteration.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iter 11 was a pure regression-safety pass after a code-quality refactor (creds-to-env, is-None cleanup, console wrapper). Nothing functional changed. Future testing agents: backend tests via pytest live in /app/backend/tests/ — the `test_creds` fixture in conftest.py is the single source of truth for role credentials, hydrated from .env.test (gitignore TBD). Frontend E2E: useful testids are filter-organic / filter-export / filter-auction / filter-search on /products, ai-chat-open / ai-chat-input / ai-chat-send on home, forgot-email / forgot-submit / forgot-sent on /forgot-password, reset-no-token on /reset-password sans token. Public URL: kisan-baazar.preview.emergentagent.com. Brute-force tests must hit http://localhost:8001 (per Iter-10 note) due to Cloudflare ingress IP rotation breaking the per-{ip}:{email} counter.",
+  "rca of the issue": "N/A — no defects found. All four code-quality goals (no hardcoded creds, no `is None` patterns, prod-safe logger, no ESLint suppression) verified successful, and full regression suite (auth, CSRF, lockout, password reset, products, cart, AI chat, dashboards) is green."
+}

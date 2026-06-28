@@ -1,4 +1,5 @@
 import axios from "axios";
+import { logger } from "@/lib/logger";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
@@ -51,8 +52,8 @@ api.interceptors.response.use(
         if (token) cfg.headers = { ...(cfg.headers || {}), [CSRF_HEADER]: token };
         return api(cfg);
       } catch (csrfErr) {
-        // CSRF bootstrap failed — log and fall through to reject the original 403.
-        console.warn("[api] CSRF token refresh failed, propagating original 403:", csrfErr);
+        // CSRF bootstrap failed — log (dev only) and fall through to reject the original 403.
+        logger.warn("[api] CSRF token refresh failed, propagating original 403:", csrfErr);
       }
     }
     return Promise.reject(error);

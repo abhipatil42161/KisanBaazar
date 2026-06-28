@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
+import { logger } from "@/lib/logger";
 
 const AuthContext = createContext();
 export const useAuth = () => useContext(AuthContext);
@@ -45,7 +46,7 @@ export const AuthProvider = ({ children }) => {
       await api.post("/auth/logout");
     } catch (logoutErr) {
       // Logout failures are non-fatal (e.g. network); still clear client state.
-      console.warn("[auth] Logout request failed; clearing local state anyway:", logoutErr);
+      logger.warn("[auth] Logout request failed; clearing local state anyway:", logoutErr);
     }
     setUser(null);
   }, []);

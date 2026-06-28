@@ -235,7 +235,7 @@ def get_client_ip(request: Request) -> str:
 async def _ensure_aware(dt) -> datetime:
     if isinstance(dt, str):
         dt = datetime.fromisoformat(dt)
-    if dt.tzinfo is None:
+    if not dt.tzinfo:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
 
@@ -290,7 +290,7 @@ async def _user_id_from_session(token: str) -> Optional[str]:
     expires_at = sess["expires_at"]
     if isinstance(expires_at, str):
         expires_at = datetime.fromisoformat(expires_at)
-    if expires_at.tzinfo is None:
+    if not expires_at.tzinfo:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     if expires_at < datetime.now(timezone.utc):
         return None
@@ -588,12 +588,12 @@ async def list_products(
         ]
     if state:
         query["state"] = state
-    if organic is not None:
-        query["organic"] = organic
-    if export_ready is not None:
-        query["export_ready"] = export_ready
-    if auction is not None:
-        query["auction"] = auction
+    if organic:
+        query["organic"] = True
+    if export_ready:
+        query["export_ready"] = True
+    if auction:
+        query["auction"] = True
     docs = await db.products.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
     return docs
 

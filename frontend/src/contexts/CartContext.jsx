@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { logger } from "@/lib/logger";
 
 const CartContext = createContext();
 export const useCart = () => useContext(CartContext);
@@ -8,7 +9,7 @@ export const CartProvider = ({ children }) => {
   const [items, setItems] = useState(() => {
     try { return JSON.parse(localStorage.getItem("kb_cart") || "[]"); }
     catch (parseErr) {
-      console.warn("[cart] Failed to parse stored cart, starting empty:", parseErr);
+      logger.warn("[cart] Failed to parse stored cart, starting empty:", parseErr);
       return [];
     }
   });
