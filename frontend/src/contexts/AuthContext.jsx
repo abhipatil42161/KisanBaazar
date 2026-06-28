@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, useCallback } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
 
 const AuthContext = createContext();
@@ -20,12 +20,10 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   useEffect(() => {
-    // Skip if returning from Emergent OAuth callback
     if (window.location.hash?.includes("session_id=")) {
       setLoading(false);
       return;
     }
-    // Skip /me call if no token to avoid 401 console noise
     if (!localStorage.getItem("kb_token")) {
       setLoading(false);
       return;
@@ -33,35 +31,44 @@ export const AuthProvider = ({ children }) => {
     fetchMe();
   }, [fetchMe]);
 
-  const login = async (email, password) => {
+  const login = useCallback(async (email, password) => {
     const { data } = await api.post("/auth/login", { email, password });
     localStorage.setItem("kb_token", data.token);
     setUser(data.user);
     return data.user;
-  };
+  }, []);
 
-  const register = async (payload) => {
+  const register = useCallback(async (payload) => {
     const { data } = await api.post("/auth/register", payload);
     localStorage.setItem("kb_token", data.token);
     setUser(data.user);
     return data.user;
-  };
+  }, []);
 
-  const logout = async () => {
-    try { await api.post("/auth/logout"); } catch { /* ignore */ }
+  const logout = useCallback(async () => {
+    try {
+      await api.post("/auth/logout");
+    } catch (err) {
+      // Logout failures are non-fatal; client-side cleanup still proceeds.
+      if (process.env.NODE_ENV !== "production") {
+        // eslint-disable-next-line no-console
+        console.warn("Logout request failed:", err?.message);
+      }
+    }
     localStorage.removeItem("kb_token");
     setUser(null);
-  };
+  }, []);
 
-  const loginWithGoogle = () => {
+  const loginWithGoogle = useCallback(() => {
     // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
     const redirectUrl = window.location.origin + "/dashboard/buyer";
     window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
-  };
+  }, []);
 
-  return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout, loginWithGoogle, refresh: fetchMe }}>
-      {children}
-    </AuthContext.Provider>
+  const value = useMemo(
+    () => ({ user, loading, login, register, logout, loginWithGoogle, refresh: fetchMe }),
+    [user, loading, login, register, logout, loginWithGoogle, fetchMe],
   );
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };

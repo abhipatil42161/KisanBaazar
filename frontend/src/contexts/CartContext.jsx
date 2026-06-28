@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 const CartContext = createContext();
@@ -14,7 +14,7 @@ export const CartProvider = ({ children }) => {
     localStorage.setItem("kb_cart", JSON.stringify(items));
   }, [items]);
 
-  const add = (product, qty = null) => {
+  const add = useCallback((product, qty = null) => {
     const q = qty ?? product.moq ?? 1;
     setItems((arr) => {
       const idx = arr.findIndex((it) => it.product_id === product.product_id);
@@ -30,17 +30,19 @@ export const CartProvider = ({ children }) => {
       }];
     });
     toast.success(`Added ${product.title} to cart`);
-  };
+  }, []);
 
-  const remove = (pid) => setItems((arr) => arr.filter((it) => it.product_id !== pid));
-  const updateQty = (pid, qty) => setItems((arr) => arr.map((it) => it.product_id === pid ? { ...it, qty: Math.max(1, qty) } : it));
-  const clear = () => setItems([]);
+  const remove = useCallback((pid) => setItems((arr) => arr.filter((it) => it.product_id !== pid)), []);
+  const updateQty = useCallback((pid, qty) => setItems((arr) => arr.map((it) => it.product_id === pid ? { ...it, qty: Math.max(1, qty) } : it)), []);
+  const clear = useCallback(() => setItems([]), []);
+
   const total = items.reduce((sum, it) => sum + it.price * it.qty, 0);
   const count = items.reduce((sum, it) => sum + it.qty, 0);
 
-  return (
-    <CartContext.Provider value={{ items, add, remove, updateQty, clear, total, count }}>
-      {children}
-    </CartContext.Provider>
+  const value = useMemo(
+    () => ({ items, add, remove, updateQty, clear, total, count }),
+    [items, add, remove, updateQty, clear, total, count],
   );
+
+  return <CartContext.Provider value={value}>{children}</CartContext.Provider>;
 };

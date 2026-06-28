@@ -1,4 +1,4 @@
-import { createContext, useContext, useState } from "react";
+import { createContext, useCallback, useContext, useMemo, useState } from "react";
 import { t as translate } from "@/lib/i18n";
 
 const LanguageContext = createContext();
@@ -7,12 +7,14 @@ export const useLanguage = () => useContext(LanguageContext);
 export const LanguageProvider = ({ children }) => {
   const [lang, setLang] = useState(() => localStorage.getItem("kb_lang") || "en");
 
-  const setLanguage = (l) => {
+  const setLanguage = useCallback((l) => {
     setLang(l);
     localStorage.setItem("kb_lang", l);
-  };
+  }, []);
 
-  const t = (key) => translate(lang, key);
+  const t = useCallback((key) => translate(lang, key), [lang]);
 
-  return <LanguageContext.Provider value={{ lang, setLanguage, t }}>{children}</LanguageContext.Provider>;
+  const value = useMemo(() => ({ lang, setLanguage, t }), [lang, setLanguage, t]);
+
+  return <LanguageContext.Provider value={value}>{children}</LanguageContext.Provider>;
 };

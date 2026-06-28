@@ -1,0 +1,23 @@
+{
+  "summary": "Iteration 3 regression after Context useMemo/useCallback refactor (AuthContext, CartContext, ThemeContext, LanguageContext). Backend untouched and smoke-confirmed. All four context-consumer flows verified end-to-end with zero React pageerrors during navigation. The useMemo/useCallback refactor did not break any consumer; auth persistence, cart updates, theme class toggle, language menu, and logout all work as expected.",
+  "tested_scope": ["backend", "frontend", "auth", "integration"],
+  "passed": [
+    "Backend smoke: GET /api/products -> 200",
+    "Backend smoke: POST /api/auth/login farmer@kisanbaazar.in/farmer123 -> 200 with token (len 145)",
+    "Backend smoke: GET /api/auth/me with Bearer -> 200",
+    "AuthContext (useMemo+useCallback): farmer login -> /dashboard/farmer redirect succeeds",
+    "AuthContext: buyer login -> /dashboard/buyer redirect succeeds; header shows 'Anita Sharma'",
+    "ThemeContext (useMemo+useCallback toggle): clicking [data-testid=theme-toggle] flips document.documentElement.classList 'dark' (false -> true)",
+    "LanguageContext (useMemo+useCallback): clicking [data-testid=lang-toggle] opens menu with English/Hindi/Marathi/Gujarati/Punjabi/Tamil/Telugu/Kannada/Malayalam options (screenshot evidence)",
+    "CartContext (useMemo+useCallback add): clicking [data-testid=add-cart-<id>] on /products updates header cart badge from empty to '1' (screenshot evidence)",
+    "Logout flow: [data-testid=user-menu-btn] -> [data-testid=menu-logout] clears auth token, redirects to /login, shows 'Welcome back, Anita Sharma!' toast (validates new try/catch logout error handling — no thrown error, clean redirect)",
+    "Zero pageerror events captured during full multi-page navigation (login -> dashboard -> products -> logout)"
+  ],
+  "failed": [],
+  "action_items": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "retest_needed": false,
+  "full_testing_deferred": true,
+  "test_credentials": "Loaded from /app/memory/test_credentials.md; farmer + buyer verified.",
+  "notes": "Did not re-run full backend suite (orders, AI streaming, price-predict) since iteration_2 confirmed 16/16 and this iteration had NO backend changes. Razorpay payment remains MOCKED. Context refactor verified safe — auth/cart/theme/language consumers all re-render correctly."
+}
