@@ -6,9 +6,13 @@ import { Trash2 } from "lucide-react";
 export default function FarmerListings({ products, onChange }) {
   const remove = async (pid) => {
     if (!window.confirm("Delete this listing?")) return;
-    await api.delete(`/products/${pid}`);
-    toast.success("Removed");
-    onChange();
+    try {
+      await api.delete(`/products/${pid}`);
+      toast.success("Removed");
+      onChange();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Delete failed");
+    }
   };
 
   return (

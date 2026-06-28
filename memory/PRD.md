@@ -42,7 +42,18 @@ Build a modern, secure, scalable, multilingual agriculture marketplace named **K
 - ✅ Language switcher (16 langs) + Dark/Light theme
 - ✅ All UI uses Outfit (headings) + Work Sans (body), green/white organic theme
 
+## Refactor — Phase A (2026-02-Feb-28)
+- ✅ FarmerDashboard.jsx (217 LOC) split into 4 sub-components + 1 hook (each <120 LOC)
+  - `/components/farmer/FarmerStats.jsx`, `FarmerListings.jsx`, `FarmerOrders.jsx`, `AddProductDialog.jsx`
+  - `/hooks/useFarmerData.js` (data loader with `reload` exposed)
+- ✅ AIChat.jsx split into `chat/ChatHeader.jsx`, `MessageList.jsx`, `MessageInput.jsx`
+- ✅ Try/catch added to delete-listing handler
+- ✅ DialogDescription added to AddProductDialog (a11y)
+- ✅ Regression tested: backend pytest 14/14, frontend E2E 100% (iteration_8.json)
+
 ## Backlog (P1)
+- **Phase C — Auth security migration**: localStorage → httpOnly cookies + CSRF (next priority per user)
+- **Phase B — Continue splitting**: Home.jsx, Products.jsx, ProductDetail.jsx, Checkout.jsx
 - Real Razorpay integration (replace MOCK with actual `razorpay-python` SDK)
 - Image upload (object storage) instead of URL paste
 - AI image quality check, AI disease detection
@@ -63,7 +74,8 @@ Build a modern, secure, scalable, multilingual agriculture marketplace named **K
 - Help center + support tickets
 
 ## Next Action Items
-1. Plug in real Razorpay keys when user provides them
-2. Add image upload via object storage
-3. Implement ratings/reviews
-4. Add WhatsApp order confirmations
+1. **Phase C** — Migrate auth from `localStorage` to `httpOnly` cookies + CSRF tokens
+2. **Phase B** — Continue component split (Home, Products, ProductDetail, Checkout)
+3. Plug in real Razorpay keys when user provides them
+4. Add image upload via object storage
+5. Implement ratings/reviews

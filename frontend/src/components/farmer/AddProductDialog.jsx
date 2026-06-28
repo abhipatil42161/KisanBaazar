@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { Plus, Sparkles } from "lucide-react";
@@ -58,7 +58,10 @@ export default function AddProductDialog({ cats, onCreated }) {
         </Button>
       </DialogTrigger>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-        <DialogHeader><DialogTitle className="font-heading">List a new product</DialogTitle></DialogHeader>
+        <DialogHeader>
+          <DialogTitle className="font-heading">List a new product</DialogTitle>
+          <DialogDescription>Add a new crop or product listing to your storefront. Buyers will see it instantly.</DialogDescription>
+        </DialogHeader>
         <form onSubmit={submit} className="space-y-4">
           <div className="grid sm:grid-cols-2 gap-4">
             <div className="sm:col-span-2">
