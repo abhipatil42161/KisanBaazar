@@ -1,27 +1,26 @@
 import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { getJson } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { ShoppingBag, Heart, Package } from "lucide-react";
 import { Link } from "react-router-dom";
 
+// Module-scope fetcher.
+const fetchBuyerData = () =>
+  Promise.all([
+    getJson("/dashboard/stats"),
+    getJson("/orders"),
+    getJson("/wishlist"),
+  ]).then(([stats, orders, wishlist]) => ({ stats, orders, wishlist }));
+
 export default function BuyerDashboard() {
   const { user } = useAuth();
-  const [stats, setStats] = useState({});
-  const [orders, setOrders] = useState([]);
-  const [wishlist, setWishlist] = useState([]);
+  const [data, setData] = useState({ stats: {}, orders: [], wishlist: [] });
 
   useEffect(() => {
-    Promise.all([
-      api.get("/dashboard/stats"),
-      api.get("/orders"),
-      api.get("/wishlist"),
-    ]).then((results) => {
-      setStats(results[0].data);
-      setOrders(results[1].data);
-      setWishlist(results[2].data);
-    });
-    // One-shot mount fetch; 'api' and setters are stable; 'results' is a callback param.
-  }, []);
+    fetchBuyerData().then(setData);
+  }, [setData]);
+
+  const { stats, orders } = data;
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -31,7 +30,7 @@ export default function BuyerDashboard() {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-6 mb-8">
         <Stat icon={ShoppingBag} label="Total Orders" value={stats.orders || 0} color="bg-primary" />
         <Stat icon={Heart} label="Wishlist" value={stats.wishlist || 0} color="bg-rose-500" />
-        <Stat icon={Package} label="Pending" value={orders.filter(o => o.status === "placed").length} color="bg-amber-500" />
+        <Stat icon={Package} label="Pending" value={orders.filter((o) => o.status === "placed").length} color="bg-amber-500" />
       </div>
 
       <h2 className="font-heading font-semibold text-xl mb-3">My Orders</h2>
@@ -49,7 +48,7 @@ export default function BuyerDashboard() {
                 <div className="text-xs capitalize">{o.status} · {o.payment_status}</div>
               </div>
             </div>
-            <div className="mt-3 text-sm text-muted-foreground">{o.items.map(i => `${i.title} × ${i.qty}`).join(" · ")}</div>
+            <div className="mt-3 text-sm text-muted-foreground">{o.items.map((it) => `${it.title} × ${it.qty}`).join(" · ")}</div>
           </div>
         ))}
       </div>

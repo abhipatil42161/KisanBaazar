@@ -17,6 +17,13 @@ export const api = axios.create({
   withCredentials: true,
 });
 
+/**
+ * Convenience wrapper: GET <url> and return response.data directly.
+ * Lets call sites use `.then(setter)` without an intermediate Promise-callback
+ * variable inside React hooks (keeps useEffect/useCallback bodies dep-clean).
+ */
+export const getJson = (url, opts) => api.get(url, opts).then((response) => response.data);
+
 // Attach CSRF header on every mutating request
 api.interceptors.request.use((config) => {
   const method = (config.method || "get").toLowerCase();

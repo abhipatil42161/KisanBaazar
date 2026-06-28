@@ -1,28 +1,29 @@
 import { useCallback, useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { getJson } from "@/lib/api";
+
+// Module-scope: keeps the useCallback body free of Promise-callback params.
+const fetchFarmerData = (userId) =>
+  Promise.all([
+    getJson("/dashboard/stats"),
+    getJson("/products"),
+    getJson("/orders"),
+    getJson("/categories"),
+  ]).then(([stats, products, orders, cats]) => ({
+    stats,
+    products: products.filter((item) => item.farmer_id === userId),
+    orders,
+    cats,
+  }));
 
 export function useFarmerData(userId) {
-  const [stats, setStats] = useState({});
-  const [products, setProducts] = useState([]);
-  const [orders, setOrders] = useState([]);
-  const [cats, setCats] = useState([]);
+  const [data, setData] = useState({ stats: {}, products: [], orders: [], cats: [] });
 
-  const load = useCallback(async () => {
-    const results = await Promise.all([
-      api.get("/dashboard/stats"),
-      api.get("/products"),
-      api.get("/orders"),
-      api.get("/categories"),
-    ]);
-    setStats(results[0].data);
-    setProducts(results[1].data.filter((item) => item.farmer_id === userId));
-    setOrders(results[2].data);
-    setCats(results[3].data);
-    // 'userId' is the only reactive dep. 'api', setters, 'results' and 'item' are
-    // either stable imports, stable React setters, or function-scope locals.
-  }, [userId]);
+  const load = useCallback(
+    () => fetchFarmerData(userId).then(setData),
+    [userId, setData],
+  );
 
   useEffect(() => { load(); }, [load]);
 
-  return { stats, products, orders, cats, reload: load };
+  return { ...data, reload: load };
 }

@@ -1,18 +1,20 @@
 import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { getJson } from "@/lib/api";
 import { Users, Package, ShoppingBag, IndianRupee } from "lucide-react";
 
+// Module-scope fetcher: returns the combined dashboard payload.
+const fetchAdminData = () =>
+  Promise.all([getJson("/dashboard/stats"), getJson("/orders")])
+    .then(([stats, orders]) => ({ stats, orders }));
+
 export default function AdminDashboard() {
-  const [stats, setStats] = useState({});
-  const [orders, setOrders] = useState([]);
+  const [data, setData] = useState({ stats: {}, orders: [] });
 
   useEffect(() => {
-    Promise.all([api.get("/dashboard/stats"), api.get("/orders")]).then((results) => {
-      setStats(results[0].data);
-      setOrders(results[1].data);
-    });
-    // One-shot mount fetch; 'api' and setters are stable; 'results' is a callback param.
-  }, []);
+    fetchAdminData().then(setData);
+  }, [setData]);
+
+  const { stats, orders } = data;
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">

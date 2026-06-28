@@ -24,9 +24,18 @@ BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://kisan-baazar.preview
 API = f"{BASE_URL}/api"
 
 CREDS = {
-    "farmer": ("farmer@kisanbaazar.in", "farmer123"),
-    "buyer":  ("buyer@kisanbaazar.in",  "buyer123"),
-    "admin":  ("admin@kisanbaazar.in",  "admin123"),
+    "farmer": (
+        os.environ.get("TEST_FARMER_EMAIL", "farmer@kisanbaazar.in"),
+        os.environ.get("TEST_FARMER_PASSWORD", "farmer123"),
+    ),
+    "buyer": (
+        os.environ.get("TEST_BUYER_EMAIL", "buyer@kisanbaazar.in"),
+        os.environ.get("TEST_BUYER_PASSWORD", "buyer123"),
+    ),
+    "admin": (
+        os.environ.get("TEST_ADMIN_EMAIL", "admin@kisanbaazar.in"),
+        os.environ.get("TEST_ADMIN_PASSWORD", "admin123"),
+    ),
 }
 
 # Cookie-name constants (avoid literal "kb_token="/"csrf_token=" snippets in test code)

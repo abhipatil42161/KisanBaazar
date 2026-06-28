@@ -3,6 +3,21 @@ import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 
+// Module-scope: parses the OAuth hash and exchanges the session token, then
+// invokes `refresh` + `nav`. Returns a Promise so the effect can chain `.catch`.
+const exchangeGoogleSession = (sessionId, refresh, nav) =>
+  api
+    .post("/auth/google/session", null, { headers: { "X-Session-ID": sessionId } })
+    .then(refresh)
+    .then(() => nav("/dashboard/buyer", { replace: true }));
+
+const parseSessionId = () => {
+  const match = (window.location.hash || "").match(/session_id=([^&]+)/);
+  return match ? match[1] : null;
+};
+
+const formatAuthError = (err) => err.response?.data?.detail || "Auth failed";
+
 export default function AuthCallback() {
   const nav = useNavigate();
   const { refresh } = useAuth();
@@ -12,19 +27,10 @@ export default function AuthCallback() {
   useEffect(() => {
     if (processed.current) return;
     processed.current = true;
-    const hash = window.location.hash;
-    const m = hash.match(/session_id=([^&]+)/);
-    if (!m) { setError("Missing session"); return; }
-    const sessionId = m[1];
-    api.post("/auth/google/session", null, { headers: { "X-Session-ID": sessionId } })
-      .then(async () => {
-        await refresh();
-        nav("/dashboard/buyer", { replace: true });
-      })
-      .catch((err) => setError(err.response?.data?.detail || "Auth failed"));
-    // Deps cover the only reactive values (nav, refresh). 'api' is a stable import;
-    // 'err'/'data'/'detail' are Promise-callback params, not reactive deps.
-  }, [nav, refresh]);
+    const sessionId = parseSessionId();
+    if (!sessionId) { setError("Missing session"); return; }
+    exchangeGoogleSession(sessionId, refresh, nav).catch((err) => setError(formatAuthError(err)));
+  }, [nav, refresh, setError]);
 
   return (
     <div className="min-h-[60vh] flex items-center justify-center">

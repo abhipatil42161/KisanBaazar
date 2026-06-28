@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api } from "@/lib/api";
+import { getJson } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import ProductCard from "@/components/ProductCard";
@@ -56,12 +56,9 @@ export default function Home() {
   const nav = useNavigate();
 
   useEffect(() => {
-    api.get("/products?limit=12").then((res) => setProducts(res.data));
-    api.get("/categories").then((res) => setCats(res.data));
-    // Intentionally empty deps: this is a one-shot mount fetch. 'api' is a stable
-    // axios singleton; 'setProducts'/'setCats' are stable React setters; 'res' is
-    // a Promise-callback parameter (not a reactive value).
-  }, []);
+    getJson("/products?limit=12").then(setProducts);
+    getJson("/categories").then(setCats);
+  }, [setProducts, setCats]);
 
   const onSearch = (e) => {
     e.preventDefault();

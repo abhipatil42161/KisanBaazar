@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { api } from "@/lib/api";
+import { api, getJson } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +9,13 @@ import { useCart } from "@/contexts/CartContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
 import { MapPin, Award, Sprout, Gavel, Calendar, Truck, ShieldCheck, Plus, Minus } from "lucide-react";
+
+// Module-scope: fetch + apply in one step so the hook body has zero Promise-callback params.
+const fetchAndApplyProduct = (productId, setProduct, setQty) =>
+  getJson(`/products/${productId}`).then((product) => {
+    setProduct(product);
+    setQty(product.moq || 1);
+  });
 
 export default function ProductDetail() {
   const { id } = useParams();
@@ -20,9 +27,8 @@ export default function ProductDetail() {
   const { user } = useAuth();
 
   const load = useCallback(
-    () => api.get(`/products/${id}`).then((res) => { setP(res.data); setQty(res.data.moq || 1); }),
-    // 'api' is a stable axios import; setters are stable; 'res' is a Promise-callback param.
-    [id]
+    () => fetchAndApplyProduct(id, setP, setQty),
+    [id, setP, setQty],
   );
   useEffect(() => { load(); }, [load]);
 
@@ -35,8 +41,8 @@ export default function ProductDetail() {
       toast.success(`Bid placed at ₹${data.current_bid}`);
       setBidAmt("");
       load();
-    } catch (e) {
-      toast.error(e.response?.data?.detail || "Bid failed");
+    } catch (err) {
+      toast.error(err.response?.data?.detail || "Bid failed");
     }
   };
 

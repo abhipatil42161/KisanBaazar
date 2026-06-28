@@ -9,13 +9,11 @@ export const ThemeProvider = ({ children }) => {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
     localStorage.setItem("kb_theme", theme);
-    // 'theme' is the only reactive value; document/localStorage are globals.
   }, [theme]);
 
   const toggle = useCallback(
-    () => setTheme((t) => (t === "dark" ? "light" : "dark")),
-    // 'setTheme' from useState is stable; 't' is a callback param.
-    []
+    () => setTheme((current) => (current === "dark" ? "light" : "dark")),
+    [setTheme],
   );
 
   const value = useMemo(() => ({ theme, toggle }), [theme, toggle]);

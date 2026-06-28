@@ -138,14 +138,11 @@ function useToast() {
   React.useEffect(() => {
     listeners.push(setState)
     return () => {
-      const index = listeners.indexOf(setState)
-      if (index > -1) {
-        listeners.splice(index, 1)
+      const idx = listeners.indexOf(setState)
+      if (idx > -1) {
+        listeners.splice(idx, 1)
       }
     };
-    // 'setState' (React.useState setter) is stable; 'listeners' is a module-scope
-    // array; 'index' is a function-scope local. Effect intentionally re-subscribes
-    // on every state change to stay in sync with the toast store.
   }, [state])
 
   return {
