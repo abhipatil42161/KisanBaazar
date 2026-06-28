@@ -51,9 +51,23 @@ Build a modern, secure, scalable, multilingual agriculture marketplace named **K
 - ✅ DialogDescription added to AddProductDialog (a11y)
 - ✅ Regression tested: backend pytest 14/14, frontend E2E 100% (iteration_8.json)
 
+## Refactor — Phase C: Auth Security (2026-02-Feb-28)
+- ✅ Migrated JWT from `localStorage` → `httpOnly` cookie `kb_token` (Secure, SameSite=Lax)
+- ✅ Implemented double-submit CSRF: non-httpOnly cookie `csrf_token` + required `X-CSRF-Token` header on POST/PUT/PATCH/DELETE
+- ✅ Backend `csrf_middleware` enforces CSRF on authenticated mutations (skipped when no auth cookie); uses `secrets.compare_digest` for timing-safe compare
+- ✅ Exempt paths: `/api/auth/login`, `/api/auth/register`, `/api/auth/google/session`, `/api/auth/csrf`
+- ✅ New `POST /api/auth/csrf` endpoint to bootstrap/rotate CSRF tokens
+- ✅ Logout clears `kb_token` + `csrf_token` + legacy `session_token`
+- ✅ Backend reads token in priority order: `kb_token` cookie → `session_token` (Emergent Google) → `Authorization: Bearer` (legacy fallback)
+- ✅ Frontend axios: `withCredentials:true`, request interceptor auto-attaches CSRF header from cookie, 403-CSRF auto-retry once
+- ✅ CORS tightened: explicit `FRONTEND_URL` origin, `allow_credentials=true` (no wildcard)
+- ✅ Frontend no longer touches `localStorage` for auth (only for UI prefs: lang, cart, theme)
+- ✅ Tested: backend 37/37 pytest, frontend E2E 100% (iteration_9.json) — zero CSRF errors during full UI flow
+
 ## Backlog (P1)
-- **Phase C — Auth security migration**: localStorage → httpOnly cookies + CSRF (next priority per user)
 - **Phase B — Continue splitting**: Home.jsx, Products.jsx, ProductDetail.jsx, Checkout.jsx
+- **Brute-force protection** on /api/auth/login (per playbook — 5 fails = 15min lockout via login_attempts collection)
+- **Password reset** flow (/api/auth/forgot-password + /api/auth/reset-password)
 - Real Razorpay integration (replace MOCK with actual `razorpay-python` SDK)
 - Image upload (object storage) instead of URL paste
 - AI image quality check, AI disease detection
@@ -74,7 +88,7 @@ Build a modern, secure, scalable, multilingual agriculture marketplace named **K
 - Help center + support tickets
 
 ## Next Action Items
-1. **Phase C** — Migrate auth from `localStorage` to `httpOnly` cookies + CSRF tokens
+1. **Brute-force protection** + **password reset** flow (auth hardening continuation)
 2. **Phase B** — Continue component split (Home, Products, ProductDetail, Checkout)
 3. Plug in real Razorpay keys when user provides them
 4. Add image upload via object storage
