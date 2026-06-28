@@ -48,7 +48,15 @@ CSRF_EXEMPT_PATHS = {
     "/api/auth/register",
     "/api/auth/google/session",
     "/api/auth/csrf",
+    "/api/auth/forgot-password",
+    "/api/auth/reset-password",
 }
+
+# ------------------ Brute-force / Password reset constants ------------------
+LOCK_THRESHOLD = 5
+LOCK_DURATION = timedelta(minutes=15)
+RESET_TOKEN_TTL = timedelta(hours=1)
+MIN_PW_LEN = 6
 
 
 def _set_auth_cookies(response: Response, jwt_token: str, csrf_value: Optional[str] = None) -> str:
@@ -97,6 +105,15 @@ class RegisterReq(BaseModel):
 class LoginReq(BaseModel):
     email: EmailStr
     password: str
+
+
+class ForgotPasswordReq(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordReq(BaseModel):
+    token: str
+    new_password: str
 
 
 class Product(BaseModel):
@@ -206,6 +223,58 @@ def public_user(doc: dict) -> dict:
     return {k: v for k, v in doc.items() if k not in ("password", "_id")}
 
 
+def get_client_ip(request: Request) -> str:
+    """Honour X-Forwarded-For when behind a reverse proxy / ingress."""
+    fwd = request.headers.get("X-Forwarded-For", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+# ------------------ Brute-force lockout helpers ------------------
+async def _ensure_aware(dt) -> datetime:
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+async def check_lockout(identifier: str) -> None:
+    rec = await db.login_attempts.find_one({"identifier": identifier})
+    if not rec or not rec.get("locked_until"):
+        return
+    locked_until = await _ensure_aware(rec["locked_until"])
+    now = datetime.now(timezone.utc)
+    if locked_until > now:
+        retry_after = int((locked_until - now).total_seconds())
+        minutes = retry_after // 60 + 1
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many failed attempts. Account locked. Try again in {minutes} minute(s).",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+async def record_failed_login(identifier: str) -> int:
+    now = datetime.now(timezone.utc)
+    rec = await db.login_attempts.find_one({"identifier": identifier}) or {}
+    attempts = int(rec.get("attempts", 0)) + 1
+    update = {"identifier": identifier, "attempts": attempts, "last_attempt_at": now}
+    if attempts >= LOCK_THRESHOLD:
+        update["locked_until"] = now + LOCK_DURATION
+    await db.login_attempts.update_one({"identifier": identifier}, {"$set": update}, upsert=True)
+    return attempts
+
+
+async def clear_attempts(identifier: str) -> None:
+    await db.login_attempts.delete_one({"identifier": identifier})
+
+
+async def clear_attempts_for_email(email: str) -> None:
+    await db.login_attempts.delete_many({"identifier": {"$regex": f":{email.lower()}$"}})
+
+
 def _user_id_from_jwt(token: str) -> Optional[str]:
     try:
         payload = pyjwt.decode(token, JWT_SECRET, algorithms=["HS256"])
@@ -289,13 +358,14 @@ async def csrf_middleware(request: Request, call_next):
 # ------------------ Auth Routes ------------------
 @api.post("/auth/register")
 async def register(req: RegisterReq, response: Response):
-    existing = await db.users.find_one({"email": req.email}, {"_id": 0})
+    email = req.email.lower()
+    existing = await db.users.find_one({"email": email}, {"_id": 0})
     if existing:
         raise HTTPException(400, "Email already registered")
     user_id = f"user_{uuid.uuid4().hex[:12]}"
     doc = {
         "user_id": user_id,
-        "email": req.email,
+        "email": email,
         "password": hash_pw(req.password),
         "name": req.name,
         "role": req.role,
@@ -312,10 +382,23 @@ async def register(req: RegisterReq, response: Response):
 
 
 @api.post("/auth/login")
-async def login(req: LoginReq, response: Response):
-    user = await db.users.find_one({"email": req.email}, {"_id": 0})
-    if not user or "password" not in user or not verify_pw(req.password, user["password"]):
+async def login(req: LoginReq, request: Request, response: Response):
+    email = req.email.lower()
+    identifier = f"{get_client_ip(request)}:{email}"
+    await check_lockout(identifier)
+
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    valid = bool(user and "password" in user and verify_pw(req.password, user["password"]))
+    if not valid:
+        attempts = await record_failed_login(identifier)
+        remaining = max(0, LOCK_THRESHOLD - attempts)
+        if remaining == 0:
+            raise HTTPException(429, "Too many failed attempts. Account locked for 15 minutes.")
+        if remaining <= 2:
+            raise HTTPException(401, f"Invalid credentials ({remaining} attempt{'s' if remaining != 1 else ''} remaining)")
         raise HTTPException(401, "Invalid credentials")
+
+    await clear_attempts(identifier)
     token = make_jwt(user["user_id"])
     csrf = _set_auth_cookies(response, token)
     return {"user": public_user(user), "csrf_token": csrf}
@@ -350,6 +433,51 @@ async def logout(response: Response, session_token: Optional[str] = Cookie(None)
         await db.user_sessions.delete_one({"session_token": session_token})
     _clear_auth_cookies(response)
     return {"ok": True}
+
+
+@api.post("/auth/forgot-password")
+async def forgot_password(req: ForgotPasswordReq):
+    """Issue a single-use reset token (1hr TTL). Always returns the same response to prevent email enumeration."""
+    email = req.email.lower()
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    if user:
+        token = secrets.token_urlsafe(32)
+        expires_at = datetime.now(timezone.utc) + RESET_TOKEN_TTL
+        await db.password_reset_tokens.insert_one({
+            "token": token,
+            "user_id": user["user_id"],
+            "email": email,
+            "expires_at": expires_at,
+            "used": False,
+            "created_at": now_iso(),
+        })
+        reset_link = f"{FRONTEND_URL.rstrip('/')}/reset-password?token={token}"
+        # In production, email this link. For dev we log it so testing can pull from backend logs.
+        logger.info("PASSWORD_RESET_LINK email=%s link=%s", email, reset_link)
+    return {"ok": True, "message": "If an account exists for that email, a reset link has been sent."}
+
+
+@api.post("/auth/reset-password")
+async def reset_password(req: ResetPasswordReq):
+    if len(req.new_password) < MIN_PW_LEN:
+        raise HTTPException(400, f"Password must be at least {MIN_PW_LEN} characters")
+    rec = await db.password_reset_tokens.find_one({"token": req.token})
+    if not rec or rec.get("used"):
+        raise HTTPException(400, "Invalid or expired reset token")
+    expires_at = await _ensure_aware(rec["expires_at"])
+    if expires_at < datetime.now(timezone.utc):
+        raise HTTPException(400, "Invalid or expired reset token")
+    await db.users.update_one(
+        {"user_id": rec["user_id"]},
+        {"$set": {"password": hash_pw(req.new_password)}},
+    )
+    await db.password_reset_tokens.update_one(
+        {"token": req.token},
+        {"$set": {"used": True, "used_at": now_iso()}},
+    )
+    # Clear any active lockouts so the user can log in immediately after reset
+    await clear_attempts_for_email(rec["email"])
+    return {"ok": True, "message": "Password updated. You can now log in."}
 
 
 @api.post("/auth/google/session")
@@ -734,3 +862,19 @@ else:
 @app.on_event("shutdown")
 async def shutdown():
     client.close()
+
+
+@app.on_event("startup")
+async def startup_indexes():
+    """Ensure MongoDB indexes for auth security."""
+    try:
+        await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
+        await db.password_reset_tokens.create_index("token", unique=True)
+        await db.login_attempts.create_index("identifier", unique=True)
+        # users.email index is best-effort (existing seed data may differ in case)
+        try:
+            await db.users.create_index("email", unique=True)
+        except Exception as e:
+            logger.warning("users.email unique index skipped: %s", e)
+    except Exception as e:
+        logger.exception("Index creation failed: %s", e)

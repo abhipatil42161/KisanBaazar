@@ -22,7 +22,13 @@ export default function Login() {
       toast.success(`Welcome back, ${u.name}!`);
       nav(u.role === "farmer" ? "/dashboard/farmer" : u.role === "admin" ? "/dashboard/admin" : "/dashboard/buyer");
     } catch (e) {
-      toast.error(e.response?.data?.detail || "Login failed");
+      const status = e.response?.status;
+      const msg = e.response?.data?.detail || "Login failed";
+      if (status === 429) {
+        toast.error(msg, { duration: 10000 });
+      } else {
+        toast.error(msg);
+      }
     } finally { setBusy(false); }
   };
 
@@ -61,7 +67,12 @@ export default function Login() {
                 className="h-12 rounded-xl mt-1.5" placeholder="you@example.com" />
             </div>
             <div>
-              <Label className="font-medium">Password</Label>
+              <div className="flex items-center justify-between">
+                <Label className="font-medium">Password</Label>
+                <Link to="/forgot-password" data-testid="forgot-password-link" className="text-xs text-primary font-medium hover:underline">
+                  Forgot password?
+                </Link>
+              </div>
               <Input data-testid="login-password" type="password" required value={pw} onChange={(e) => setPw(e.target.value)}
                 className="h-12 rounded-xl mt-1.5" placeholder="••••••••" />
             </div>

@@ -1,0 +1,72 @@
+{
+  "summary": "Iteration 10 — brute-force lockout (5-attempt threshold + 15-min lock) and password reset flow (1hr TTL, single-use, lockout-clearing) end-to-end validated. Backend: 16/16 new tests + 37/37 regression (test_csrf_cookie_auth + test_farmer_regression) = 53/53 PASS. Frontend E2E: /forgot-password, /reset-password (with and without token), Login -> Forgot link, full forgot->log-parse->reset->login round-trip, and 5-strike UI lockout with progressive 'N attempts remaining' toasts followed by 'Too many failed attempts...' all pass. No defects found in this iteration.",
+  "tested_scope": ["backend", "frontend", "integration", "auth-security"],
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "/api/auth/login",
+        "issue": "On the 5th wrong attempt (the one that TRIGGERS the lockout), the 429 response does NOT carry the Retry-After header — that header is only emitted on the 6th and subsequent locked-out requests (because check_lockout is the only place that adds it, and on the triggering 5th request check_lockout has already returned). The spec asks for Retry-After on every 429. Low impact (UX nit only); a single-line fix would be to add `headers={'Retry-After': str(LOCK_DURATION.total_seconds())}` to the 429 raise inside login() when remaining hits 0."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "passed": [
+    "Brute-force: attempts 1-2 -> 401 'Invalid credentials'; attempt 3 -> 401 with '(2 attempts remaining)'; attempt 4 -> 401 with '(1 attempt remaining)'; attempt 5 -> 429 lockout; attempt 6 -> 429 + Retry-After header",
+    "During lockout, correct password is also rejected with 429 for the same ip+email",
+    "Successful login clears the failed-attempt doc in db.login_attempts",
+    "Per-{ip}:{email} isolation — locking one email leaves a different email still able to log in",
+    "/api/auth/forgot-password with EXISTING email -> 200 generic message + PASSWORD_RESET_LINK logged + new row in db.password_reset_tokens (used=false, expires_at ~now+1h)",
+    "/api/auth/forgot-password with NON-EXISTENT email -> 200 same generic message; no token row created (no enumeration leak)",
+    "/api/auth/forgot-password is CSRF-exempt — bare POST with no cookies/no X-CSRF-Token still returns 200",
+    "/api/auth/reset-password full happy path: valid token + new_password>=6 -> 200; bcrypt hash updated; token marked used=true; old password 401; new password 200",
+    "/api/auth/reset-password reuse of same token -> 400 'Invalid or expired reset token'",
+    "/api/auth/reset-password bogus token -> 400",
+    "/api/auth/reset-password expired token (expires_at set to past in Mongo) -> 400",
+    "/api/auth/reset-password new_password<6 chars -> 400 'Password must be at least 6 characters'",
+    "/api/auth/reset-password clears active lockout for affected email (locked account can log in immediately with new password)",
+    "Mongo indexes: password_reset_tokens.expires_at is TTL (expireAfterSeconds:0); password_reset_tokens.token is unique; login_attempts.identifier is unique",
+    "CSRF regression: login still sets kb_token (HttpOnly) + csrf_token (readable); POST /api/products without CSRF=403, with CSRF=2xx, unauthenticated=401",
+    "Frontend: /forgot-password route renders form (testid forgot-email/forgot-submit) and shows forgot-sent panel after submit",
+    "Frontend: /reset-password without ?token shows reset-no-token panel",
+    "Frontend: /login page Forgot password? link (testid forgot-password-link) navigates to /forgot-password",
+    "Frontend: 5 wrong-password submissions via /login form show progressive toasts ('2 attempts remaining' on 3rd, '1 attempt remaining' on 4th, 'Too many failed attempts. Account locked for 15 minutes.' on 5th)",
+    "Frontend: full E2E forgot->reset round-trip — register temp @example.com user, submit /forgot-password, parse token from backend.err.log, visit /reset-password?token=<x>, set new password, get redirected to /login with 'Password updated. Please sign in.' toast, then log in with new password (200)",
+    "Regression: 37/37 prior backend tests (test_csrf_cookie_auth + test_farmer_regression) still pass unchanged"
+  ],
+  "failed": [],
+  "test_report_links": [
+    "/app/backend/tests/test_lockout_password_reset.py",
+    "/app/backend/tests/test_csrf_cookie_auth.py",
+    "/app/backend/tests/test_farmer_regression.py",
+    "/app/test_reports/pytest/iteration_10.xml"
+  ],
+  "action_items": [
+    "OPTIONAL (low priority): Emit Retry-After header on the 5th login attempt (the request that triggers the lockout). Currently it is only set on requests AFTER the lock is active. One-line fix in the login() handler."
+  ],
+  "critical_code_review_comments": [
+    "Brute-force counter is per-{ip}:{email} — correct trade-off (prevents single-IP enumeration without denial-of-service against a victim by attacker spamming their email from many IPs would still raise OPS alerts; acceptable for an MVP).",
+    "check_lockout() correctly raises 429 with Retry-After header. record_failed_login() also raises 429 on the threshold-crossing attempt but WITHOUT Retry-After — minor inconsistency noted above.",
+    "Identifier regex on lockout clear (clear_attempts_for_email) uses unanchored `$regex` which is fine because the identifier format is `{ip}:{email}` and we anchor with `:{email}$` — no false positives.",
+    "Password reset: token is 32 bytes urlsafe (256 bits) -> non-guessable. TTL index + used flag give both natural expiry AND replay protection.",
+    "Email enumeration: forgot-password always returns the same 200 body — verified no information leak.",
+    "CSRF_EXEMPT_PATHS contains both /api/auth/forgot-password and /api/auth/reset-password — correct (bootstrap endpoints, no session cookie present).",
+    "Reset token DOC stores plaintext token (not a hash). Acceptable given 256-bit entropy + short TTL + single-use, but for defence-in-depth a future iteration could store sha256(token).",
+    "Frontend ResetPassword.jsx correctly redirects to /login on success and toasts. Toast lifetime appears to follow sonner default (~4s); the 10-second 429 toast on Login.jsx is the specifically-long one and was observed working.",
+    "Frontend ForgotPassword.jsx success state hides the form and shows the email it was sent to — good UX."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_lockout_password_reset.py (new — 16 tests covering lockout, forgot-password, reset-password, Mongo indexes, CSRF regression)"
+  ],
+  "success_rate": {"backend": "100% (16/16 new + 37/37 regression = 53/53)", "frontend": "100% (all 6 spec E2E flows passed)"},
+  "test_credentials": "Demo accounts in /app/memory/test_credentials.md still valid (farmer/buyer/admin). Tests use throwaway TEST_*@example.com accounts and clean up via mongosh.",
+  "seed_data_creation": "None permanent. Tests register and delete TEST_*@example.com users in setup/teardown; reset tokens and login_attempts rows are also cleaned per test.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Lockout brute-force tests MUST hit the backend via http://localhost:8001 (variable LOCAL_API in the test file) — through Cloudflare the public URL routes via varying ingress IPs which makes the per-{ip}:{email} counter unstable. The public URL is fine for non-lockout endpoints (forgot/reset/CSRF). Backend logs PASSWORD_RESET_LINK to /var/log/supervisor/backend.err.log; emails are lowercased before logging (so grep with lower()). Cloudflare strips the Retry-After header on public 429s — that header is only assertable when hitting the backend on localhost. The 5th wrong-password attempt does NOT carry Retry-After (see backend_issues.minor) — only the 6th+ does. Test file: /app/backend/tests/test_lockout_password_reset.py — 16 tests in 5 classes. To clear a lockout in dev: `mongosh test_database --eval 'db.login_attempts.deleteMany({identifier:{$regex:\":<email>$\"}})'`.",
+  "rca of the issue": "N/A — no functional defects. One UX nit (Retry-After missing on the threshold-crossing 5th attempt) documented above."
+}
