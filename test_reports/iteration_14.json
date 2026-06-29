@@ -1,0 +1,43 @@
+{
+  "summary": "RETEST of iteration_13 HIGH bugs for Cloudinary integration — BOTH FIXES VERIFIED end-to-end. Bug 1 (parallel-upload race): set_input_files with 2 PNGs now produces image-tile-0 AND image-tile-1, counter reads '2 / 10 images', and the created product persists '2 photos' (API confirmed images.length=2). Bug 2 (orphan-delete 403): pre-submit X click now triggers DELETE /api/cloudinary/image → 200. Backend: per-user folder scoping verified (`kisanbaazar/products/user_demofarmer01`); cross-user delete still 403; admin can delete anywhere; backend pytest 61 passed / 4 skipped (skips are pytest-xdist worker isolation, not failures — all 12 Cloudinary tests pass when run sequentially in one worker).",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": { "ui_bugs": [], "integration_issues": [], "design_issues": [] },
+  "verifications_passed": [
+    "GET /api/cloudinary/signature → folder='kisanbaazar/products/user_demofarmer01' (per-user scoping verified)",
+    "Playwright set_input_files with 2 PNGs simultaneously → BOTH image-tile-0 AND image-tile-1 rendered + counter '2 / 10 images' (screenshot evidence)",
+    "Full submit flow with 2 images → product POST 200 → listing shows 'TEST_Multi_76217 · ₹75/kg · 100 available · 2 photos' → GET /api/products confirms images.length === 2",
+    "Pre-submit X click on uploaded tile → DELETE /api/cloudinary/image returned 200 (previously 403)",
+    "Cross-user delete: buyer attempting to DELETE farmer's orphan public_id → 403 (test_cross_user_cannot_delete_others_orphan passes)",
+    "Admin can delete arbitrary public_id (not their own folder) → 200",
+    "Farmer can delete own orphan (in their per-user folder) → 200 (updated assertion from previous iteration)",
+    "Backend pytest: 12/12 Cloudinary tests pass in sequential run; 61/61 overall non-skipped pass",
+    "Security: grep for API_SECRET 'u2VqfqGUt5pGHR9IM3uu9RP03mg' and API_KEY '267641129395818' in /app/frontend/src/ → 0 matches",
+    "Backwards-compat string-URL images still pass through (TestStringUrlBackwardsCompat passed)",
+    "Orphan cascade on PUT (replace images) still cleans CDN within ~5s",
+    "Product DELETE cascade still 404s CDN within ~5s"
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_cloudinary_integration.py",
+    "/app/test_reports/pytest/iteration_14.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Functional setState pattern in ImageUploader.uploadOne and AddProductDialog.set() correctly resolves the stale-closure race (verified by parallel 2-file upload e2e).",
+    "Per-user folder scoping in signature_payload uses defense-in-depth alnum/underscore/hyphen sanitisation + length cap (64) — solid against signed-path abuse.",
+    "user_owns_public_id correctly checks startswith on the user-folder prefix; cross-user delete remains 403 (verified).",
+    "Note (low priority): the 4 'skipped' pytest results when running with xdist parallel workers are because pytest._kb_test_pid module-level state is per-worker — consider scoping fixtures with session/store via a shared fixture file or removing parallel run for this single module. Functional behavior is unaffected (12/12 pass sequentially)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_cloudinary_integration.py (updated: signature folder assertion now expects per-user scope; admin-delete test updated to reflect farmer-can-delete-own-orphan=200; new test_cross_user_cannot_delete_others_orphan added)"
+  ],
+  "success_rate": {
+    "backend": "100% (61/61 non-skipped; 12/12 Cloudinary in sequential run)",
+    "frontend": "100% (both HIGH bugs from iteration_13 verified fixed end-to-end)"
+  },
+  "test_credentials": "Used /app/memory/test_credentials.md — farmer/buyer/admin @ kisanbaazar.in",
+  "seed_data_creation": "Created and cleaned 2 TEST_Multi_/TEST_Cloudinary product listings during e2e validation",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Cloudinary integration now fully working including multi-file simultaneous upload and pre-submit orphan delete. The previous iteration_13 bugs are both verified fixed by main agent's functional-setState pattern in ImageUploader.uploadOne/removeAt and per-user folder ownership in cloudinary_service.user_owns_public_id. Test file at /app/backend/tests/test_cloudinary_integration.py is the regression baseline (12 tests). Future agents: run `cd /app && python -m pytest backend/tests/ -q` for full suite (61 pass + 4 xdist-isolation skips). For frontend retest, use the Playwright pattern in this iteration: set_input_files with multiple files on [data-testid=image-input] then assert both image-tile-0 and image-tile-1 + counter '2 / 10 images'.",
+  "rca_of_the_issue": "Bug 1 RCA: ImageUploader.uploadOne previously captured `value` via stale closure → concurrent uploads computed [...value, ref] against same snapshot → last write wins → 1 image saved instead of N. Fix verified: functional updater `onChange((prev) => [...(prev||[]), ref])` propagated through AddProductDialog.set() which now handles updater fns: `setForm((f) => ({ ...f, [k]: typeof v === 'function' ? v(f[k]) : v }))`. Bug 2 RCA: backend required public_id to be referenced by a user-owned product before allowing DELETE → first-time pre-submit uploads always 403 → silent orphan leak in Cloudinary. Fix verified: signature endpoint now scopes folder per-user (`kisanbaazar/products/user_<id>`); DELETE /api/cloudinary/image now permits delete if cloudinary_user_owns(pid, user_id) — i.e. the public_id lives under the user's folder. Cross-user protection preserved because folders are per-user-id."
+}

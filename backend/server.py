@@ -27,6 +27,7 @@ from cloudinary_service import (  # noqa: E402
     signature_payload as cloudinary_signature_payload,
     delete_image as cloudinary_delete_image,
     delete_many as cloudinary_delete_many,
+    user_owns_public_id as cloudinary_user_owns,
 )
 
 MONGO_URL = os.environ["MONGO_URL"]
@@ -711,13 +712,13 @@ async def cloudinary_signature(
     user: User = Depends(get_current_user),
 ):
     """Return signed params so the SPA can upload directly to Cloudinary.
-    Any authenticated user can request a signature; assets are scoped to
-    the configured kisanbaazar/ folder tree.
+    Assets are scoped to `kisanbaazar/products/<user_id>/` so the uploader can
+    later remove pre-submit (orphan) assets without needing a referencing product row.
     """
     if not CLOUDINARY_ENABLED:
         raise HTTPException(503, "Image upload not configured")
     try:
-        payload = cloudinary_signature_payload(folder) if folder else cloudinary_signature_payload()
+        payload = cloudinary_signature_payload(folder, user_id=user.user_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return payload
@@ -728,9 +729,9 @@ async def cloudinary_delete(
     req: CloudinaryDeleteReq,
     user: User = Depends(get_current_user),
 ):
-    """Delete a Cloudinary asset. Allowed for admins, or for the owner of a
-    product that currently references this public_id. Detached/orphan deletes
-    are restricted to admins.
+    """Delete a Cloudinary asset. Allowed if (a) caller is admin, (b) the asset
+    lives in the caller's signed-upload subfolder, or (c) the asset is currently
+    attached to a product the caller owns.
     """
     if not CLOUDINARY_ENABLED:
         raise HTTPException(503, "Image upload not configured")
@@ -738,8 +739,7 @@ async def cloudinary_delete(
     if not pid:
         raise HTTPException(400, "public_id required")
 
-    if user.role != "admin":
-        # Owner-only: confirm the public_id is attached to a product the caller owns
+    if user.role != "admin" and not cloudinary_user_owns(pid, user.user_id):
         owning_product = await db.products.find_one(
             {"farmer_id": user.user_id, "images.public_id": pid},
             {"_id": 0, "product_id": 1},

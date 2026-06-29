@@ -42,24 +42,44 @@ def configure() -> bool:
     return True
 
 
-def signature_payload(folder: str = UPLOAD_FOLDER) -> dict:
-    """Return signed params the frontend uses to upload directly to Cloudinary."""
-    if not folder.startswith(ALLOWED_FOLDER_PREFIX):
+def signature_payload(folder: str | None = None, user_id: str | None = None) -> dict:
+    """Return signed params the frontend uses to upload directly to Cloudinary.
+
+    When `user_id` is supplied the asset is scoped to a per-user subfolder so
+    the same user can later delete pre-submit (orphan) uploads without needing
+    a referencing product row.
+    """
+    base = (folder or UPLOAD_FOLDER).rstrip("/")
+    if user_id:
+        # Sanitise: user_id is server-generated (`user_xxxxxxxxxxxx`) so already safe,
+        # but keep the regex narrow as defense-in-depth.
+        safe_uid = "".join(c for c in user_id if c.isalnum() or c in "_-")[:64]
+        if safe_uid:
+            base = f"{base}/{safe_uid}"
+    if not base.startswith(ALLOWED_FOLDER_PREFIX):
         raise ValueError(f"folder must start with '{ALLOWED_FOLDER_PREFIX}'")
     if not API_SECRET:
         raise RuntimeError("Cloudinary not configured")
     timestamp = int(time.time())
-    params_to_sign = {"timestamp": timestamp, "folder": folder}
+    params_to_sign = {"timestamp": timestamp, "folder": base}
     signature = cloudinary.utils.api_sign_request(params_to_sign, API_SECRET)
     return {
         "signature": signature,
         "timestamp": timestamp,
         "cloud_name": CLOUD_NAME,
         "api_key": API_KEY,
-        "folder": folder,
+        "folder": base,
         "max_bytes": MAX_BYTES,
         "allowed_formats": list(ALLOWED_FORMATS),
     }
+
+
+def user_owns_public_id(public_id: str, user_id: str) -> bool:
+    """True if a public_id lives under the user's signed-upload subfolder."""
+    if not (public_id and user_id):
+        return False
+    safe_uid = "".join(c for c in user_id if c.isalnum() or c in "_-")[:64]
+    return public_id.startswith(f"{UPLOAD_FOLDER.rstrip('/')}/{safe_uid}/")
 
 
 def delete_image(public_id: str) -> bool:

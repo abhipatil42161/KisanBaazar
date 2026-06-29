@@ -74,7 +74,8 @@ class TestSignatureEndpoint:
         for k in ("signature", "timestamp", "api_key", "cloud_name", "folder", "max_bytes", "allowed_formats"):
             assert k in d, f"missing key {k}"
         assert d["cloud_name"] == "xuo2ru3u"
-        assert d["folder"] == "kisanbaazar/products"
+        # Folder is now per-user scoped: kisanbaazar/products/user_<id>
+        assert d["folder"].startswith("kisanbaazar/products/user_"), d["folder"]
         assert d["max_bytes"] == 10 * 1024 * 1024
         assert sorted(d["allowed_formats"]) == ["jpeg", "jpg", "png", "webp"]
         # sha1 hex string
@@ -228,7 +229,7 @@ class TestCloudinaryDeletePermissions:
         assert r.status_code == 403, r.text
 
     def test_admin_can_delete_arbitrary_then_owner_reuploads(self, admin_sess, farmer_sess):
-        """Admin should be able to delete any public_id even if not theirs."""
+        """Admin can delete any public_id. Farmer can delete their OWN orphan (post-fix)."""
         # Upload a fresh standalone asset as farmer (but not attached to any product)
         sig = farmer_sess.get(f"{BASE_URL}/api/cloudinary/signature").json()
         files = {"file": ("admin_del.png", _tiny_png_bytes(), "image/png")}
@@ -241,14 +242,34 @@ class TestCloudinaryDeletePermissions:
         ur = requests.post(UPLOAD_URL, files=files, data=data, timeout=30).json()
         pub_id = ur["public_id"]
 
-        # Farmer cannot delete because the asset is NOT attached to a product they own
+        # POST-FIX: Farmer CAN delete their own orphan because public_id lives under their user folder
         r1 = farmer_sess.delete(f"{BASE_URL}/api/cloudinary/image", json={"public_id": pub_id})
-        assert r1.status_code == 403, f"farmer should NOT be able to delete orphan asset: {r1.text}"
+        assert r1.status_code == 200, f"farmer should be able to delete own orphan asset post-fix: {r1.text}"
+        assert r1.json().get("ok") is True
 
-        # Admin can delete it
-        r2 = admin_sess.delete(f"{BASE_URL}/api/cloudinary/image", json={"public_id": pub_id})
+        # Upload another orphan as farmer to verify admin-can-delete-others-orphan path
+        ur2 = requests.post(UPLOAD_URL, files={"file": ("admin_del2.png", _tiny_png_bytes(), "image/png")}, data=data, timeout=30).json()
+        pub_id2 = ur2["public_id"]
+        r2 = admin_sess.delete(f"{BASE_URL}/api/cloudinary/image", json={"public_id": pub_id2})
         assert r2.status_code == 200, r2.text
         assert r2.json()["ok"] is True
+
+    def test_cross_user_cannot_delete_others_orphan(self, farmer_sess, buyer_sess):
+        """Buyer must NOT be able to delete farmer's orphan (ownership fix is per-user folder, not permissive)."""
+        sig = farmer_sess.get(f"{BASE_URL}/api/cloudinary/signature").json()
+        files = {"file": ("cross.png", _tiny_png_bytes(), "image/png")}
+        data = {
+            "api_key": sig["api_key"],
+            "timestamp": str(sig["timestamp"]),
+            "signature": sig["signature"],
+            "folder": sig["folder"],
+        }
+        ur = requests.post(UPLOAD_URL, files=files, data=data, timeout=30).json()
+        pub_id = ur["public_id"]
+        r = buyer_sess.delete(f"{BASE_URL}/api/cloudinary/image", json={"public_id": pub_id})
+        assert r.status_code == 403, f"cross-user delete must 403: {r.text}"
+        # Cleanup as farmer (owner)
+        farmer_sess.delete(f"{BASE_URL}/api/cloudinary/image", json={"public_id": pub_id})
 
 
 # ---- Tests: product DELETE cascade -------------------------------------------

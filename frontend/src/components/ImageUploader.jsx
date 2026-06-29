@@ -58,7 +58,8 @@ export default function ImageUploader({ value = [], onChange, max = MAX_IMG_COUN
         width: data.width,
         height: data.height,
       };
-      onChange([...(value || []), ref]);
+      // Functional updater — safe under concurrent uploads (avoids stale-closure race).
+      onChange((prev) => [...(Array.isArray(prev) ? prev : []), ref]);
     } catch (err) {
       if (axios.isCancel(err)) {
         toast.message(`Cancelled ${file.name}`);
@@ -68,7 +69,7 @@ export default function ImageUploader({ value = [], onChange, max = MAX_IMG_COUN
     } finally {
       setUploads((u) => u.filter((x) => x.id !== uid));
     }
-  }, [onChange, value]);
+  }, [onChange]);
 
   const accept = useCallback((files) => {
     const list = Array.from(files || []);
@@ -91,8 +92,7 @@ export default function ImageUploader({ value = [], onChange, max = MAX_IMG_COUN
 
   const removeAt = async (idx) => {
     const img = value[idx];
-    const next = value.filter((_, i) => i !== idx);
-    onChange(next);
+    onChange((prev) => (prev || []).filter((_, i) => i !== idx));
     if (img && typeof img === "object" && img.public_id) {
       try { await api.delete("/cloudinary/image", { data: { public_id: img.public_id } }); }
       catch { /* best-effort; image already detached client-side */ }

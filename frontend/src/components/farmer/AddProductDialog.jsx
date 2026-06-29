@@ -27,7 +27,13 @@ export default function ProductFormDialog({ cats, onSaved, existing = null, trig
   const [predicting, setPredicting] = useState(false);
   const [busy, setBusy] = useState(false);
   const isEdit = Boolean(existing);
-  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  /**
+   * `set` accepts a value OR an updater function (mirrors React's setState
+   * signature). This lets children like <ImageUploader/> use functional updates
+   * to avoid stale-closure races when multiple async operations land at once.
+   */
+  const set = (k, v) =>
+    setForm((f) => ({ ...f, [k]: typeof v === "function" ? v(f[k]) : v }));
 
   useEffect(() => {
     if (open) {
