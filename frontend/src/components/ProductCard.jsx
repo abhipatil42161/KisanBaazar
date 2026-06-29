@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { MapPin, Award, Sprout, Gavel } from "lucide-react";
 import { useCart } from "@/contexts/CartContext";
 import { useLanguage } from "@/contexts/LanguageContext";
+import { imgUrl } from "@/lib/images";
 
 export default function ProductCard({ p, index = 0 }) {
   const { add } = useCart();
@@ -14,7 +15,7 @@ export default function ProductCard({ p, index = 0 }) {
       style={{ animationDelay: `${index * 40}ms` }}>
       <Link to={`/products/${p.product_id}`} className="block relative aspect-[4/3] overflow-hidden bg-muted">
         {p.images?.[0] && (
-          <img src={p.images[0]} alt={p.title}
+          <img src={imgUrl(p.images[0])} alt={p.title}
             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
         )}
         <div className="absolute top-3 left-3 flex gap-1.5 flex-wrap">

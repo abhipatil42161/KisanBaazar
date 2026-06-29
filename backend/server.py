@@ -21,11 +21,22 @@ from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, Strea
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
+# Import AFTER load_dotenv so module-level os.environ reads see populated values.
+from cloudinary_service import (  # noqa: E402
+    configure as configure_cloudinary,
+    signature_payload as cloudinary_signature_payload,
+    delete_image as cloudinary_delete_image,
+    delete_many as cloudinary_delete_many,
+)
+
 MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 EMERGENT_LLM_KEY = os.environ["EMERGENT_LLM_KEY"]
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "*")
+
+# Initialise Cloudinary (no-op if env vars missing — see cloudinary_service)
+CLOUDINARY_ENABLED = configure_cloudinary()
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -131,7 +142,7 @@ class Product(BaseModel):
     quality_grade: Literal["A", "B", "C", "Export"] = "A"
     organic: bool = False
     export_ready: bool = False
-    images: List[str] = []
+    images: List = []
     location: str
     state: str
     country: str = "India"
@@ -153,7 +164,7 @@ class ProductCreate(BaseModel):
     quality_grade: Literal["A", "B", "C", "Export"] = "A"
     organic: bool = False
     export_ready: bool = False
-    images: List[str] = []
+    images: List = []
     location: str
     state: str
     country: str = "India"
@@ -631,8 +642,120 @@ async def delete_product(pid: str, user: User = Depends(get_current_user)):
         raise HTTPException(404, "Not found")
     if prod["farmer_id"] != user.user_id and user.role != "admin":
         raise HTTPException(403, "Forbidden")
+    # Cascade-delete Cloudinary assets (best-effort; failures logged)
+    public_ids = [
+        img.get("public_id")
+        for img in (prod.get("images") or [])
+        if isinstance(img, dict) and img.get("public_id")
+    ]
+    if public_ids:
+        cloudinary_delete_many(public_ids)
     await db.products.delete_one({"product_id": pid})
     return {"ok": True}
+
+
+class ProductUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    price: Optional[float] = None
+    unit: Optional[str] = None
+    moq: Optional[int] = None
+    available_qty: Optional[int] = None
+    quality_grade: Optional[Literal["A", "B", "C", "Export"]] = None
+    organic: Optional[bool] = None
+    export_ready: Optional[bool] = None
+    images: Optional[List] = None
+    location: Optional[str] = None
+    state: Optional[str] = None
+    harvest_date: Optional[str] = None
+
+
+@api.put("/products/{pid}")
+async def update_product(pid: str, req: ProductUpdate, user: User = Depends(get_current_user)):
+    prod = await db.products.find_one({"product_id": pid}, {"_id": 0})
+    if not prod:
+        raise HTTPException(404, "Not found")
+    if prod["farmer_id"] != user.user_id and user.role != "admin":
+        raise HTTPException(403, "Forbidden")
+    updates = {k: v for k, v in req.model_dump(exclude_unset=True).items() if v is not None}
+    # If images are replaced, cascade-delete removed Cloudinary assets
+    if "images" in updates:
+        old_ids = {
+            img.get("public_id")
+            for img in (prod.get("images") or [])
+            if isinstance(img, dict) and img.get("public_id")
+        }
+        new_ids = {
+            img.get("public_id")
+            for img in updates["images"]
+            if isinstance(img, dict) and img.get("public_id")
+        }
+        orphans = old_ids - new_ids
+        if orphans:
+            cloudinary_delete_many(orphans)
+    if updates:
+        await db.products.update_one({"product_id": pid}, {"$set": updates})
+    updated = await db.products.find_one({"product_id": pid}, {"_id": 0})
+    return updated
+
+
+# ------------------ Cloudinary signed-upload + delete ------------------
+class CloudinaryDeleteReq(BaseModel):
+    public_id: str
+
+
+@api.get("/cloudinary/signature")
+async def cloudinary_signature(
+    folder: Optional[str] = None,
+    user: User = Depends(get_current_user),
+):
+    """Return signed params so the SPA can upload directly to Cloudinary.
+    Any authenticated user can request a signature; assets are scoped to
+    the configured kisanbaazar/ folder tree.
+    """
+    if not CLOUDINARY_ENABLED:
+        raise HTTPException(503, "Image upload not configured")
+    try:
+        payload = cloudinary_signature_payload(folder) if folder else cloudinary_signature_payload()
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return payload
+
+
+@api.delete("/cloudinary/image")
+async def cloudinary_delete(
+    req: CloudinaryDeleteReq,
+    user: User = Depends(get_current_user),
+):
+    """Delete a Cloudinary asset. Allowed for admins, or for the owner of a
+    product that currently references this public_id. Detached/orphan deletes
+    are restricted to admins.
+    """
+    if not CLOUDINARY_ENABLED:
+        raise HTTPException(503, "Image upload not configured")
+    pid = req.public_id.strip()
+    if not pid:
+        raise HTTPException(400, "public_id required")
+
+    if user.role != "admin":
+        # Owner-only: confirm the public_id is attached to a product the caller owns
+        owning_product = await db.products.find_one(
+            {"farmer_id": user.user_id, "images.public_id": pid},
+            {"_id": 0, "product_id": 1},
+        )
+        if not owning_product:
+            raise HTTPException(403, "Forbidden")
+
+    ok = cloudinary_delete_image(pid)
+    if not ok:
+        raise HTTPException(502, "Cloudinary delete failed")
+    # Detach from any product references that still hold it
+    await db.products.update_many(
+        {"images.public_id": pid},
+        {"$pull": {"images": {"public_id": pid}}},
+    )
+    return {"ok": True, "public_id": pid}
 
 
 @api.post("/products/{pid}/bid")

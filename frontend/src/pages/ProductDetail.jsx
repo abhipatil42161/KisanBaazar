@@ -9,6 +9,7 @@ import { useCart } from "@/contexts/CartContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
 import { MapPin, Award, Sprout, Gavel, Calendar, Truck, ShieldCheck, Plus, Minus } from "lucide-react";
+import { imgUrl } from "@/lib/images";
 
 // Module-scope: fetch + apply in one step so the hook body has zero Promise-callback params.
 const fetchAndApplyProduct = (productId, setProduct, setQty) =>
@@ -51,7 +52,7 @@ export default function ProductDetail() {
       <div className="grid lg:grid-cols-2 gap-10">
         <div>
           <div className="aspect-square bg-muted rounded-3xl overflow-hidden">
-            {p.images?.[0] && <img src={p.images[0]} alt={p.title} className="w-full h-full object-cover" />}
+            {p.images?.[0] && <img src={imgUrl(p.images[0])} alt={p.title} className="w-full h-full object-cover" />}
           </div>
         </div>
 

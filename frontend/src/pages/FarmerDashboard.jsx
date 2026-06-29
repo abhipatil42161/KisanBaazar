@@ -3,7 +3,7 @@ import { useFarmerData } from "@/hooks/useFarmerData";
 import FarmerStats from "@/components/farmer/FarmerStats";
 import FarmerListings from "@/components/farmer/FarmerListings";
 import FarmerOrders from "@/components/farmer/FarmerOrders";
-import AddProductDialog from "@/components/farmer/AddProductDialog";
+import ProductFormDialog from "@/components/farmer/AddProductDialog";
 
 export default function FarmerDashboard() {
   const { user } = useAuth();
@@ -16,13 +16,13 @@ export default function FarmerDashboard() {
           <h1 className="font-heading font-bold text-3xl">Farmer Dashboard</h1>
           <p className="text-muted-foreground mt-1">Welcome, {user.name} 🌾</p>
         </div>
-        <AddProductDialog cats={cats} onCreated={reload} />
+        <ProductFormDialog cats={cats} onSaved={reload} />
       </div>
 
       <FarmerStats stats={stats} />
 
       <div className="grid lg:grid-cols-2 gap-8">
-        <FarmerListings products={products} onChange={reload} />
+        <FarmerListings products={products} cats={cats} onChange={reload} />
         <FarmerOrders orders={orders} />
       </div>
     </div>

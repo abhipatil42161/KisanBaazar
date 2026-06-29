@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,20 +8,50 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
-import { Plus, Sparkles } from "lucide-react";
+import { Plus, Sparkles, Pencil } from "lucide-react";
+import ImageUploader from "@/components/ImageUploader";
 
 const EMPTY = {
   title: "", description: "", category: "vegetables", price: "", unit: "kg", moq: 1, available_qty: 100,
-  quality_grade: "A", organic: false, export_ready: false, images: "", location: "", state: "",
+  quality_grade: "A", organic: false, export_ready: false, images: [], location: "", state: "",
   harvest_date: "", auction: false,
 };
 
-export default function AddProductDialog({ cats, onCreated }) {
+/**
+ * ProductFormDialog handles both Add and Edit. Pass `existing` to enter Edit mode.
+ * Add mode triggers via "List Product" button; Edit mode triggers via "Pencil" icon.
+ */
+export default function ProductFormDialog({ cats, onSaved, existing = null, trigger = null }) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(EMPTY);
   const [predicting, setPredicting] = useState(false);
   const [busy, setBusy] = useState(false);
+  const isEdit = Boolean(existing);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  useEffect(() => {
+    if (open) {
+      setForm(existing
+        ? {
+            title: existing.title || "",
+            description: existing.description || "",
+            category: existing.category || "vegetables",
+            price: existing.price ?? "",
+            unit: existing.unit || "kg",
+            moq: existing.moq ?? 1,
+            available_qty: existing.available_qty ?? 100,
+            quality_grade: existing.quality_grade || "A",
+            organic: !!existing.organic,
+            export_ready: !!existing.export_ready,
+            images: existing.images || [],
+            location: existing.location || "",
+            state: existing.state || "",
+            harvest_date: existing.harvest_date || "",
+            auction: !!existing.auction,
+          }
+        : EMPTY);
+    }
+  }, [open, existing]);
 
   const aiPredict = async () => {
     if (!form.title || !form.location) { toast.error("Add title & location first"); return; }
@@ -39,30 +69,50 @@ export default function AddProductDialog({ cats, onCreated }) {
     e.preventDefault();
     setBusy(true);
     try {
-      await api.post("/products", {
+      const payload = {
         ...form,
-        price: Number(form.price), moq: Number(form.moq), available_qty: Number(form.available_qty),
-        images: form.images.split(",").map((s) => s.trim()).filter(Boolean),
-      });
-      toast.success("Product listed!");
-      setOpen(false); setForm(EMPTY); onCreated();
-    } catch (e) { toast.error(e.response?.data?.detail || "Failed"); }
+        price: Number(form.price),
+        moq: Number(form.moq),
+        available_qty: Number(form.available_qty),
+      };
+      if (isEdit) {
+        await api.put(`/products/${existing.product_id}`, payload);
+        toast.success("Product updated");
+      } else {
+        await api.post("/products", payload);
+        toast.success("Product listed!");
+      }
+      setOpen(false);
+      setForm(EMPTY);
+      onSaved();
+    } catch (err) { toast.error(err.response?.data?.detail || "Failed"); }
     finally { setBusy(false); }
   };
 
+  const defaultTrigger = isEdit ? (
+    <Button data-testid={`edit-product-${existing?.product_id}`} size="icon" variant="ghost"
+      className="text-muted-foreground hover:text-primary">
+      <Pencil size={18} />
+    </Button>
+  ) : (
+    <Button data-testid="add-product-btn" className="h-12 px-6 rounded-xl bg-primary hover:bg-primary/90 font-semibold">
+      <Plus size={18} className="mr-1" /> List Product
+    </Button>
+  );
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button data-testid="add-product-btn" className="h-12 px-6 rounded-xl bg-primary hover:bg-primary/90 font-semibold">
-          <Plus size={18} className="mr-1" /> List Product
-        </Button>
-      </DialogTrigger>
+      <DialogTrigger asChild>{trigger || defaultTrigger}</DialogTrigger>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle className="font-heading">List a new product</DialogTitle>
-          <DialogDescription>Add a new crop or product listing to your storefront. Buyers will see it instantly.</DialogDescription>
+          <DialogTitle className="font-heading">{isEdit ? "Edit product" : "List a new product"}</DialogTitle>
+          <DialogDescription>{isEdit ? "Update product details. Removed images are deleted from storage." : "Add a new crop or product listing to your storefront. Buyers will see it instantly."}</DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="space-y-4">
+          <div>
+            <Label className="mb-1.5 block">Photos</Label>
+            <ImageUploader value={form.images} onChange={(imgs) => set("images", imgs)} />
+          </div>
           <div className="grid sm:grid-cols-2 gap-4">
             <div className="sm:col-span-2">
               <Label>Product title</Label>
@@ -105,7 +155,6 @@ export default function AddProductDialog({ cats, onCreated }) {
             <div><Label>Available qty</Label><Input data-testid="form-qty" type="number" value={form.available_qty} onChange={(e) => set("available_qty", e.target.value)} className="rounded-xl h-11 mt-1" /></div>
             <div><Label>Location</Label><Input data-testid="form-location" required value={form.location} onChange={(e) => set("location", e.target.value)} className="rounded-xl h-11 mt-1" /></div>
             <div><Label>State</Label><Input data-testid="form-state" required value={form.state} onChange={(e) => set("state", e.target.value)} className="rounded-xl h-11 mt-1" /></div>
-            <div className="sm:col-span-2"><Label>Image URLs (comma-separated)</Label><Input data-testid="form-images" value={form.images} onChange={(e) => set("images", e.target.value)} className="rounded-xl h-11 mt-1" /></div>
             <div><Label>Harvest date</Label><Input data-testid="form-harvest" type="date" value={form.harvest_date} onChange={(e) => set("harvest_date", e.target.value)} className="rounded-xl h-11 mt-1" /></div>
             <div className="flex flex-col gap-2 justify-end pb-1">
               <label className="flex items-center gap-2 cursor-pointer text-sm"><Checkbox data-testid="form-organic" checked={form.organic} onCheckedChange={(v) => set("organic", v)} /> Organic certified</label>
@@ -113,7 +162,7 @@ export default function AddProductDialog({ cats, onCreated }) {
             </div>
           </div>
           <Button data-testid="form-submit" type="submit" disabled={busy} className="w-full h-12 rounded-xl bg-primary hover:bg-primary/90 font-semibold">
-            {busy ? "Listing…" : "List Product"}
+            {busy ? (isEdit ? "Saving…" : "Listing…") : (isEdit ? "Save changes" : "List Product")}
           </Button>
         </form>
       </DialogContent>

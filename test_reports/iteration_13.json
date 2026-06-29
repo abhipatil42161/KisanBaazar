@@ -1,0 +1,81 @@
+{
+  "summary": "Cloudinary signed-upload integration tested end-to-end (backend pytest + frontend Playwright). Backend: 11 new Cloudinary integration tests added + 53 existing tests all pass (64/64). Frontend E2E mostly green, but 2 real bugs found: (1) multi-file simultaneous upload race-overwrites due to stale-closure of value in ImageUploader.uploadOne; (2) orphan asset (uploaded but not yet attached to a product) cannot be removed by the uploader — DELETE /api/cloudinary/image returns 403, leaking the asset in Cloudinary.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "DELETE /api/cloudinary/image",
+        "issue": "Owner check requires the public_id to already be referenced by a product the user owns. Removing a freshly-uploaded image before product creation (a normal UX flow) returns 403 and the asset leaks in Cloudinary. ImageUploader.removeAt swallows the error silently."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "ImageUploader.jsx",
+        "issue": "Parallel uploads race: selecting 2+ files at once via input or drag-drop ends up persisting only ONE in the form because uploadOne() captures `value` via closure and each onChange([...value, ref]) overwrites the previous. Confirmed in E2E: set_input_files with 2 PNGs produced only image-tile-0 + counter '1 / 10'; created product shows '1 photo' instead of 2. Spec requires multi-image upload up to 10.",
+        "selector": "[data-testid=image-input]",
+        "priority": "HIGH"
+      },
+      {
+        "component": "ImageUploader.jsx removeAt()",
+        "issue": "When user removes an image that was just uploaded but not yet saved to a product, DELETE /api/cloudinary/image returns 403 (no owning product). The try/catch swallows the error silently → orphan asset leaked in Cloudinary every time user cancels a pre-submit selection. Real bandwidth/storage leak.",
+        "selector": "[data-testid^=image-remove-]",
+        "priority": "HIGH"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "verifications_passed": [
+    "GET /api/cloudinary/signature: 200 with all required keys (signature sha1 hex, timestamp, api_key, cloud_name=xuo2ru3u, folder=kisanbaazar/products, max_bytes=10485760, allowed_formats=[jpg,jpeg,png,webp])",
+    "GET /api/cloudinary/signature unauthenticated → 401",
+    "GET /api/cloudinary/signature?folder=evil/path → 400",
+    "Signed direct upload to https://api.cloudinary.com/v1_1/xuo2ru3u/image/upload → 200 with secure_url under res.cloudinary.com/xuo2ru3u/, public_id under kisanbaazar/products/, width/height present",
+    "POST /api/products with image objects: 200, images preserved as objects (public_id/secure_url/width/height)",
+    "DELETE /api/products/{pid} cascades: CDN returns 404 for public_id within <5s (verified in both pytest and Playwright)",
+    "DELETE /api/cloudinary/image: buyer-on-others → 403; admin-on-orphan → 200; farmer-on-own-orphan → 403 (this is the leak bug above)",
+    "PUT /api/products/{pid} partial body (only title): only title updated, images intact",
+    "PUT /api/products/{pid} replacing images cascades: orphan public_id 404s on CDN within ~5s",
+    "Backwards-compat: string-URL images (Unsplash) pass through unchanged on POST and GET",
+    "Full pytest suite: 64/64 passed in 41.5s (53 existing + 11 new Cloudinary)",
+    "Frontend: image-uploader, image-dropzone, image-input testids render in AddProductDialog",
+    "Validation: .txt file → toast 'unsupported type', no tile, no upload initiated",
+    "Validation: 12 MB file → toast 'exceeds 10 MB limit', no tile, no upload initiated",
+    "Single image upload happy path: image-tile-0 appears, counter '1 / 10 images'",
+    "Image remove: tile-0 disappears, counter '0 / 10 images', DELETE /api/cloudinary/image called (but see leak bug)",
+    "Edit flow: pencil opens dialog, images carry through, title edit + save → toast/list shows updated title, PUT /api/products/{pid} 200",
+    "Delete flow (with confirm): listing disappears, DELETE /api/products/{pid} 200, CDN 404 within seconds",
+    "ProductCard/Dashboard <img src> for Cloudinary URLs contains '/upload/f_auto,q_auto/' (1/1 transformed in test)",
+    "Security: grep -r 'u2VqfqGUt5pGHR9IM3uu9RP03mg' /app/frontend/src/ → 0 matches. API_KEY 267641129395818 also not present in /app/frontend/src/. No build dir present."
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_cloudinary_integration.py",
+    "/app/test_reports/pytest/iteration_13.xml"
+  ],
+  "action_items": [
+    "FIX (HIGH): ImageUploader.jsx uploadOne — replace `onChange([...(value||[]), ref])` with a ref-based or functional-updater pattern so parallel uploads append to the latest state, not the captured stale value. Suggested fix: lift value into a useRef mirror or have the parent expose `onAppend(ref)` instead of `onChange(newArray)`.",
+    "FIX (HIGH): orphan Cloudinary asset leak on pre-submit remove — either (a) backend /api/cloudinary/image accepts deletes from the uploader of the asset (track uploader_id in a side collection at signature time + verify in destroy), OR (b) the frontend keeps unsaved uploads in local state and only commits them to the product, then on form-close calls a server endpoint that bulk-cleans the user's unattached recent uploads, OR (c) loosen owner-check to allow deletes within the user's folder during a short window.",
+    "Optional (low): consider exposing a structured error body on /api/cloudinary/image 403 so the UI can show a 'not yet saved — close form to release' hint."
+  ],
+  "critical_code_review_comments": [
+    "ImageUploader stale-closure bug (lines 35-71): functional state updates are mandatory when multiple async operations may complete concurrently on the same parent state.",
+    "Owner-only delete check in /api/cloudinary/image is too strict for the actual UX flow — first-time uploads always start as orphans before product creation. Recommend adding an 'uploader cleanup' path for the asset's original uploader (requires tracking signed-upload owner).",
+    "cloudinary_service.delete_image returns True on 'not found' which is correct (idempotent). Good.",
+    "Signature payload limits folder to kisanbaazar/ prefix — solid defense against signed-path abuse.",
+    "API secret stays backend-only; frontend bundle scan clean (0 matches)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_cloudinary_integration.py (new — 11 tests)"
+  ],
+  "success_rate": {
+    "backend": "100% (64/64 pytest including 11 new Cloudinary)",
+    "frontend": "~85% — happy paths green; 2 multi-upload + orphan-delete bugs need fixing"
+  },
+  "test_credentials": "Loaded from /app/backend/tests/.env.test via conftest fixture (farmer/buyer/admin @ kisanbaazar.in).",
+  "seed_data_creation": "Tests create TEST_-prefixed products and Cloudinary assets, then cascade-delete them. Tiny in-memory 1x1 PNG used to avoid filesystem fixtures.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Cloudinary integration is functionally end-to-end working for single-image flows. Two bugs in ImageUploader/server.py interaction remain (parallel-upload race + orphan-delete 403). After main agent fixes, retest only: (a) Playwright multi-file set_input_files of 2 PNGs → expect both tile-0 and tile-1 + counter '2 / 10' + product shows '2 photos'; (b) Playwright upload-then-remove pre-submit → expect DELETE /api/cloudinary/image returns 200 and Cloudinary CDN 404s the orphaned public_id. The new test file /app/backend/tests/test_cloudinary_integration.py is the regression baseline going forward.",
+  "rca of the issue": "Bug 1 (multi-upload race): In ImageUploader.jsx uploadOne (useCallback dep [onChange, value]), the closure captures `value` at the time of call. Two concurrent uploadOne calls both compute `[...value, ref]` against the same `value` snapshot; whichever resolves last wins. Reproduction: select 2+ images via input or drag-drop → only one persists. Mitigation: use functional state via an internal buffer (e.g. parent passes `onAppend(ref)` that itself does setState(v => [...v, ref])) or maintain a local ref for committed items. Bug 2 (orphan delete 403): server.py:741-748 requires the public_id to be referenced by a product owned by the user before allowing delete; for fresh, unsubmitted uploads this is always false. Reproduction: open Add Product dialog, upload image, click X → backend logs 403, asset stays in Cloudinary forever. Mitigation options listed in action_items."
+}
