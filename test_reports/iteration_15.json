@@ -1,0 +1,48 @@
+{
+  "summary": "Validated Razorpay integration in MOCK fallback mode (RAZORPAY_KEY_ID/SECRET blank in backend/.env). All 75 backend pytest tests pass (no regressions). Frontend E2E for both UPI (MOCK Razorpay) and COD checkout flows succeeded end-to-end with correct UI labels and confirmation messages. /api/payments/config exposes only {enabled,key_id} — no secret leak.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_razorpay_integration.py",
+    "/app/backend/tests/test_csrf_cookie_auth.py",
+    "/app/backend/tests/test_farmer_regression.py",
+    "/app/backend/tests/test_lockout_password_reset.py",
+    "/app/backend/tests/test_cloudinary_integration.py",
+    "/app/test_reports/pytest/iteration_15.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is 1132 lines — consider splitting into routers/modules (orders, payments, products, auth) for maintainability. Not blocking.",
+    "Checkout.jsx correctly branches finishMock vs finishRazorpay based on /payments/config and razorpay_order_id prefix — robust fallback contract.",
+    "razorpay_service.public_config() correctly returns only {enabled, key_id} — no secret exposure on the wire (verified via curl + grep)."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (75/75)", "frontend": "100% (all critical flows)"},
+  "test_credentials": "buyer@kisanbaazar.in / buyer123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "None — used seeded buyer and seeded products. Two test orders created in MongoDB during E2E (UPI mock + COD).",
+  "verifications_performed": {
+    "GET /api/payments/config": "200 {enabled:false, key_id:null}; no 'secret' or 'webhook' field",
+    "POST /api/orders (upi)": "razorpay_order_id starts with 'order_mock_', razorpay_amount_paise > 0, payment_status=pending",
+    "POST /api/orders (cod)": "razorpay_order_id null, razorpay_amount_paise 0, payment_method=cod",
+    "charge_total math": "subtotal 1000 -> charge_total 1010, razorpay_amount_paise 101000 (1% fee verified)",
+    "POST /api/orders/{oid}/pay (mock, gateway disabled)": "200 ok=true for both upi and cod",
+    "POST /api/orders/{oid}/verify bad signature": "400 (gateway disabled -> verify_payment_signature returns False)",
+    "POST /api/orders/{oid}/verify unknown order": "404",
+    "POST /api/payments/webhook unsigned": "400 (CSRF-exempt path enforced)",
+    "Frontend /checkout heading": "Shows '(MOCK Razorpay)' label when cfg.enabled=false",
+    "Frontend 5 payment methods": "pay-upi, pay-card, pay-netbanking, pay-wallet, pay-cod all present with data-testid",
+    "Frontend UPI E2E": "Order Confirmed screen shows order_id + 'MOCK Razorpay payment processed (test mode).'",
+    "Frontend COD E2E": "Button text 'Place Order (COD)', confirmation 'Cash on delivery — pay our partner when your order arrives.'",
+    "Secret leak grep": "No 'secret'/'webhook' substring in /api/payments/config response body"
+  },
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Razorpay integration is complete and verified in MOCK fallback mode. When user adds real RAZORPAY_KEY_ID/SECRET to /app/backend/.env, retest: (1) /api/payments/config returns enabled:true with key_id starting 'rzp_', (2) order creation hits real Razorpay API and razorpay_order_id starts with 'order_' (not 'order_mock_'), (3) /api/orders/{oid}/pay returns 400 for non-COD when gateway is enabled (only COD allowed via mock path). Existing pytest test classes already enforce both branches via cfg.enabled check."
+}

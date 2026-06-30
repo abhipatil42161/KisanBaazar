@@ -95,10 +95,33 @@ Build a modern, secure, scalable, multilingual agriculture marketplace named **K
 - ✅ Frontend: `/forgot-password` and `/reset-password?token=…` pages, "Forgot password?" link on `/login`, 10-second toast for lockout 429s.
 - ✅ Tested: backend **53/53 pytest** (16 new lockout/reset + 37 regression), frontend E2E **100%** (iteration_10.json). One UX nit (Retry-After missing on triggering attempt) was identified & fixed.
 
+## Cloudinary Image Upload Integration (2026-02-Feb-28)
+- ✅ Backend: `cloudinary_service.py` — signed-upload signatures with per-user folder scoping (`kisanbaazar/products/user_<id>`), defense-in-depth folder prefix allow-list, per-user ownership check, cascade `delete_many`.
+- ✅ API: `GET /api/cloudinary/signature` (auth-required, returns short-lived signed payload), `DELETE /api/cloudinary/image` (auth + ownership check, admin can delete anywhere).
+- ✅ Cascade deletes wired into Product PUT (replaced images) and Product DELETE (all images).
+- ✅ Frontend: `src/components/ImageUploader.jsx` — drag-and-drop multi-upload, JPG/PNG/WEBP only, 10 MB / 10 image caps, per-file progress, in-flight cancel, pre-submit X removes orphan from CDN. Wired into `AddProductDialog.jsx`.
+- ✅ Helpers: `src/lib/images.js` — `imgUrl()` injects `f_auto,q_auto` for all Cloudinary deliveries (automatic format + quality optimisation, no extra request). `MAX_IMG_BYTES`, `MAX_IMG_COUNT`, `ACCEPT_IMG` constants.
+- ✅ Backwards-compat: legacy seed string-URL images still render via `imgUrl()` passthrough.
+- ✅ Edge-case bug fixes: (1) functional setState in `uploadOne` eliminates parallel-upload race; (2) per-user folder + `user_owns_public_id` lets pre-submit X delete orphans without 403.
+- ✅ Security: Cloudinary API secret never leaves backend; signed URLs only; folder prefix locked to `kisanbaazar/`.
+- ✅ Tested (iteration_14.json): backend pytest 12/12 Cloudinary + 53/53 regression = **65/65 passing**, frontend E2E both HIGH bugs verified fixed.
+
+## Razorpay Real Payment Integration (2026-02-Feb-28)
+- ✅ `razorpay-python` SDK (`razorpay==2.0.1`) installed; `backend/razorpay_service.py` created with: `is_enabled()`, `public_config()`, `create_order()`, `verify_payment_signature()`, `verify_webhook_signature()` (manual HMAC for webhook-only mode).
+- ✅ API: `GET /api/payments/config` (public — returns `{enabled, key_id}`, never the secret), `POST /api/orders/{oid}/verify` (HMAC-SHA256 signature check → `paid+confirmed` or `failed`), `POST /api/payments/webhook` (CSRF-exempt, HMAC-verified).
+- ✅ `POST /api/orders` now creates a real Razorpay order (`order_*` id) for non-COD methods when keys are configured; falls back to MOCK id (`order_mock_*`) when keys absent so dev environments keep working.
+- ✅ Cash-on-Delivery method added to checkout — never hits the gateway (no signature, no Razorpay order).
+- ✅ `POST /api/orders/{oid}/pay` (mock) now refuses non-COD orders when real Razorpay is enabled (forces `/verify` path).
+- ✅ `charge_total` (subtotal × 1.01 platform fee) + `razorpay_amount_paise` persisted on order doc.
+- ✅ Frontend `Checkout.jsx` rewritten: lazy-loads `checkout.razorpay.com/v1/checkout.js`, opens `new Razorpay(...)` with `key_id` + `order_id`, verifies on `handler` callback; mock fallback on COD / disabled gateway / cancel; per-error toast handling (cancel, gateway-failed, verify-failed).
+- ✅ Env wiring: `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` in `backend/.env` + `.env.example` (all blank by default — user fills in).
+- ✅ Test cards / test UPI documented in README (link to Razorpay docs).
+- ✅ Tested: backend pytest **75/75 passing** (10 new Razorpay tests cover config endpoint, order create wiring, COD bypass, verify-rejects-bad-signature, webhook-rejects-unsigned, HMAC math, mock-pay guard rails).
+- 🟡 Operator action: set `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` in `/app/backend/.env`, then `sudo supervisorctl restart backend`. The Checkout heading auto-switches from "(MOCK Razorpay)" → "(Razorpay)" and Pay opens the real checkout modal.
+
 ## Backlog (P1)
 - **Phase B — Continue splitting**: Home.jsx, Products.jsx, ProductDetail.jsx, Checkout.jsx
 - **Active sessions / device revocation** UI (list user's logged-in devices, allow per-device logout)
-- Real Razorpay integration (replace MOCK with actual `razorpay-python` SDK)
 - Image upload (object storage) instead of URL paste
 - AI image quality check, AI disease detection
 - WhatsApp/SMS notifications (Twilio)
@@ -118,7 +141,8 @@ Build a modern, secure, scalable, multilingual agriculture marketplace named **K
 - Help center + support tickets
 
 ## Next Action Items
-1. **Phase B** — Continue component split (Home, Products, ProductDetail, Checkout)
-2. Real Razorpay integration (when keys are provided)
-3. Add image upload via object storage
-4. Implement ratings/reviews
+1. **Operator setup** — add `RAZORPAY_KEY_ID` + `RAZORPAY_KEY_SECRET` (+ optional `RAZORPAY_WEBHOOK_SECRET`) to `/app/backend/.env`, restart backend, run an end-to-end Razorpay test transaction.
+2. **Phase B** — Continue component split (Home, Products, ProductDetail, Checkout).
+3. Implement remaining AI features (Disease Detection, Market Trends, Translation).
+4. Build out Exporter + Admin dashboards (certifications, shipments, fraud, disputes).
+5. Implement ratings/reviews.

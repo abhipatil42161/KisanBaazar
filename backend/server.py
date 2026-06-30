@@ -29,6 +29,13 @@ from cloudinary_service import (  # noqa: E402
     delete_many as cloudinary_delete_many,
     user_owns_public_id as cloudinary_user_owns,
 )
+from razorpay_service import (  # noqa: E402
+    is_enabled as razorpay_enabled,
+    public_config as razorpay_public_config,
+    create_order as razorpay_create_order,
+    verify_payment_signature as razorpay_verify_signature,
+    verify_webhook_signature as razorpay_verify_webhook,
+)
 
 MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
@@ -62,6 +69,7 @@ CSRF_EXEMPT_PATHS = {
     "/api/auth/csrf",
     "/api/auth/forgot-password",
     "/api/auth/reset-password",
+    "/api/payments/webhook",
 }
 
 # ------------------ Brute-force / Password reset constants ------------------
@@ -195,11 +203,14 @@ class Order(BaseModel):
     buyer_name: str
     items: List[OrderItem]
     total: float
+    charge_total: Optional[float] = None
     delivery_address: str
     payment_method: str
     payment_status: Literal["pending", "paid", "failed"] = "pending"
     status: Literal["placed", "confirmed", "shipped", "delivered", "cancelled"] = "placed"
     razorpay_order_id: Optional[str] = None
+    razorpay_payment_id: Optional[str] = None
+    razorpay_amount_paise: Optional[int] = None
     created_at: str
 
 
@@ -210,6 +221,12 @@ class ChatReq(BaseModel):
 
 class BidReq(BaseModel):
     amount: float
+
+
+class PaymentVerifyReq(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
 
 
 # ------------------ Helpers ------------------
@@ -780,20 +797,43 @@ async def bid(pid: str, req: BidReq, user: User = Depends(get_current_user)):
 # ------------------ Orders ------------------
 @api.post("/orders")
 async def create_order(req: OrderCreate, user: User = Depends(get_current_user)):
-    total = sum(it.qty * it.price for it in req.items)
+    subtotal = sum(it.qty * it.price for it in req.items)
+    # Front-end fee: 1% rounded — same calc as Checkout summary.
+    charge_total = round(subtotal * 1.01)
     oid = f"ord_{uuid.uuid4().hex[:10]}"
-    rzp_id = f"order_mock_{uuid.uuid4().hex[:14]}"
+
+    rzp_id: Optional[str] = None
+    rzp_amount_paise = int(round(charge_total * 100))
+    # COD never hits the payment gateway. Other methods use Razorpay when
+    # configured; otherwise we fall back to the MOCK id (dev environments).
+    if req.payment_method != "cod":
+        if razorpay_enabled():
+            try:
+                rzp = razorpay_create_order(
+                    rzp_amount_paise,
+                    receipt=oid,
+                    notes={"buyer_id": user.user_id, "method": req.payment_method},
+                )
+                rzp_id = rzp["id"]
+            except Exception:
+                logger.exception("Razorpay order creation failed; falling back to mock id")
+                rzp_id = f"order_mock_{uuid.uuid4().hex[:14]}"
+        else:
+            rzp_id = f"order_mock_{uuid.uuid4().hex[:14]}"
+
     doc = {
         "order_id": oid,
         "buyer_id": user.user_id,
         "buyer_name": user.name,
         "items": [it.model_dump() for it in req.items],
-        "total": total,
+        "total": subtotal,
+        "charge_total": charge_total,
         "delivery_address": req.delivery_address,
         "payment_method": req.payment_method,
         "payment_status": "pending",
         "status": "placed",
         "razorpay_order_id": rzp_id,
+        "razorpay_amount_paise": rzp_amount_paise if req.payment_method != "cod" else 0,
         "created_at": now_iso(),
     }
     await db.orders.insert_one(doc)
@@ -801,19 +841,104 @@ async def create_order(req: OrderCreate, user: User = Depends(get_current_user))
     return doc
 
 
-@api.post("/orders/{oid}/pay")
-async def mock_pay(oid: str, user: User = Depends(get_current_user)):
+@api.get("/payments/config")
+async def payments_config():
+    """Public payment config so the frontend knows whether to use real
+    Razorpay checkout (`enabled=true` + `key_id`) or the MOCK fallback."""
+    return razorpay_public_config()
+
+
+@api.post("/orders/{oid}/verify")
+async def verify_payment(oid: str, req: PaymentVerifyReq, user: User = Depends(get_current_user)):
+    """Verify Razorpay's checkout-success signature and mark order paid."""
     order = await db.orders.find_one({"order_id": oid}, {"_id": 0})
     if not order:
         raise HTTPException(404, "Not found")
     if order["buyer_id"] != user.user_id:
         raise HTTPException(403, "Forbidden")
-    payment_id = f"pay_mock_{uuid.uuid4().hex[:14]}"
+    if order.get("razorpay_order_id") != req.razorpay_order_id:
+        raise HTTPException(400, "Order id mismatch")
+    if not razorpay_verify_signature(
+        req.razorpay_order_id, req.razorpay_payment_id, req.razorpay_signature
+    ):
+        await db.orders.update_one(
+            {"order_id": oid}, {"$set": {"payment_status": "failed"}}
+        )
+        raise HTTPException(400, "Invalid payment signature")
     await db.orders.update_one(
         {"order_id": oid},
-        {"$set": {"payment_status": "paid", "status": "confirmed", "razorpay_payment_id": payment_id}},
+        {"$set": {
+            "payment_status": "paid",
+            "status": "confirmed",
+            "razorpay_payment_id": req.razorpay_payment_id,
+            "razorpay_signature": req.razorpay_signature,
+        }},
+    )
+    return {"ok": True, "payment_id": req.razorpay_payment_id}
+
+
+@api.post("/orders/{oid}/pay")
+async def mock_pay(oid: str, user: User = Depends(get_current_user)):
+    """MOCK payment finaliser — only allowed when real Razorpay is not
+    configured (dev fallback) or when payment_method == 'cod'."""
+    order = await db.orders.find_one({"order_id": oid}, {"_id": 0})
+    if not order:
+        raise HTTPException(404, "Not found")
+    if order["buyer_id"] != user.user_id:
+        raise HTTPException(403, "Forbidden")
+    if razorpay_enabled() and order.get("payment_method") != "cod":
+        raise HTTPException(400, "Real Razorpay is enabled — use /verify instead")
+    payment_id = f"pay_mock_{uuid.uuid4().hex[:14]}"
+    new_status = "confirmed" if order.get("payment_method") != "cod" else "placed"
+    new_payment_status = "paid" if order.get("payment_method") != "cod" else "pending"
+    await db.orders.update_one(
+        {"order_id": oid},
+        {"$set": {
+            "payment_status": new_payment_status,
+            "status": new_status,
+            "razorpay_payment_id": payment_id,
+        }},
     )
     return {"ok": True, "payment_id": payment_id}
+
+
+@api.post("/payments/webhook")
+async def razorpay_webhook(request: Request):
+    """Razorpay async event webhook. Verifies HMAC, then updates the matching
+    order. Always returns 200 to keep Razorpay's delivery healthy unless the
+    signature is bad."""
+    raw = await request.body()
+    sig = request.headers.get("X-Razorpay-Signature", "")
+    if not razorpay_verify_webhook(raw, sig):
+        raise HTTPException(400, "Invalid webhook signature")
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid payload")
+    event = payload.get("event", "")
+    entity = (
+        payload.get("payload", {})
+        .get("payment", {})
+        .get("entity", {})
+    )
+    rzp_order_id = entity.get("order_id")
+    rzp_payment_id = entity.get("id")
+    if not rzp_order_id:
+        return {"ok": True, "skipped": True}
+    status_map = {
+        "payment.captured": ("paid", "confirmed"),
+        "payment.authorized": ("paid", "confirmed"),
+        "payment.failed": ("failed", "placed"),
+    }
+    new_pay, new_status = status_map.get(event, (None, None))
+    update: dict = {"razorpay_payment_id": rzp_payment_id} if rzp_payment_id else {}
+    if new_pay:
+        update["payment_status"] = new_pay
+        update["status"] = new_status
+    if update:
+        await db.orders.update_one({"razorpay_order_id": rzp_order_id}, {"$set": update})
+    logger.info("Razorpay webhook %s applied to %s", event, rzp_order_id)
+    return {"ok": True, "event": event}
 
 
 @api.get("/orders")
