@@ -35,7 +35,15 @@ from razorpay_service import (  # noqa: E402
     create_order as razorpay_create_order,
     verify_payment_signature as razorpay_verify_signature,
     verify_webhook_signature as razorpay_verify_webhook,
+    refund_payment as razorpay_refund_payment,
 )
+from payments_service import (  # noqa: E402
+    ensure_indexes as ensure_payment_indexes,
+    finalise_paid_order,
+    mark_payment_failed,
+    record_refund,
+)
+from invoice_service import generate_invoice_pdf  # noqa: E402
 
 MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
@@ -227,6 +235,11 @@ class PaymentVerifyReq(BaseModel):
     razorpay_order_id: str
     razorpay_payment_id: str
     razorpay_signature: str
+
+
+class RefundReq(BaseModel):
+    amount: Optional[float] = None  # full refund when None
+    reason: Optional[str] = None
 
 
 # ------------------ Helpers ------------------
@@ -850,7 +863,10 @@ async def payments_config():
 
 @api.post("/orders/{oid}/verify")
 async def verify_payment(oid: str, req: PaymentVerifyReq, user: User = Depends(get_current_user)):
-    """Verify Razorpay's checkout-success signature and mark order paid."""
+    """Verify Razorpay's checkout-success signature and mark order paid.
+    The post-payment workflow (stock decrement, payments row, notifications)
+    is delegated to `payments_service.finalise_paid_order()` which is
+    idempotent."""
     order = await db.orders.find_one({"order_id": oid}, {"_id": 0})
     if not order:
         raise HTTPException(404, "Not found")
@@ -861,18 +877,18 @@ async def verify_payment(oid: str, req: PaymentVerifyReq, user: User = Depends(g
     if not razorpay_verify_signature(
         req.razorpay_order_id, req.razorpay_payment_id, req.razorpay_signature
     ):
-        await db.orders.update_one(
-            {"order_id": oid}, {"$set": {"payment_status": "failed"}}
+        await mark_payment_failed(
+            db, order=order, razorpay_payment_id=req.razorpay_payment_id,
+            reason="signature_mismatch",
         )
         raise HTTPException(400, "Invalid payment signature")
-    await db.orders.update_one(
-        {"order_id": oid},
-        {"$set": {
-            "payment_status": "paid",
-            "status": "confirmed",
-            "razorpay_payment_id": req.razorpay_payment_id,
-            "razorpay_signature": req.razorpay_signature,
-        }},
+    await finalise_paid_order(
+        db,
+        order=order,
+        razorpay_payment_id=req.razorpay_payment_id,
+        razorpay_signature=req.razorpay_signature,
+        amount_paise=int(order.get("razorpay_amount_paise") or 0),
+        source="verify",
     )
     return {"ok": True, "payment_id": req.razorpay_payment_id}
 
@@ -886,27 +902,41 @@ async def mock_pay(oid: str, user: User = Depends(get_current_user)):
         raise HTTPException(404, "Not found")
     if order["buyer_id"] != user.user_id:
         raise HTTPException(403, "Forbidden")
-    if razorpay_enabled() and order.get("payment_method") != "cod":
+    is_cod = order.get("payment_method") == "cod"
+    if razorpay_enabled() and not is_cod:
         raise HTTPException(400, "Real Razorpay is enabled — use /verify instead")
     payment_id = f"pay_mock_{uuid.uuid4().hex[:14]}"
-    new_status = "confirmed" if order.get("payment_method") != "cod" else "placed"
-    new_payment_status = "paid" if order.get("payment_method") != "cod" else "pending"
-    await db.orders.update_one(
-        {"order_id": oid},
-        {"$set": {
-            "payment_status": new_payment_status,
-            "status": new_status,
-            "razorpay_payment_id": payment_id,
-        }},
-    )
+    if is_cod:
+        # COD: do not consider it captured yet — but reserve stock + notify.
+        await finalise_paid_order(
+            db, order=order, razorpay_payment_id=payment_id,
+            razorpay_signature=None,
+            amount_paise=int(order.get("razorpay_amount_paise") or 0),
+            source="mock", method="cod",
+        )
+        # Override: COD orders stay payment_status=pending until delivered.
+        await db.orders.update_one(
+            {"order_id": oid},
+            {"$set": {"payment_status": "pending", "status": "placed"}},
+        )
+        await db.payments.update_one(
+            {"razorpay_payment_id": payment_id},
+            {"$set": {"status": "cod_pending"}},
+        )
+    else:
+        await finalise_paid_order(
+            db, order=order, razorpay_payment_id=payment_id,
+            razorpay_signature=None,
+            amount_paise=int(order.get("razorpay_amount_paise") or 0),
+            source="mock",
+        )
     return {"ok": True, "payment_id": payment_id}
 
 
 @api.post("/payments/webhook")
 async def razorpay_webhook(request: Request):
-    """Razorpay async event webhook. Verifies HMAC, then updates the matching
-    order. Always returns 200 to keep Razorpay's delivery healthy unless the
-    signature is bad."""
+    """Razorpay async event webhook. HMAC-verified, idempotent on payment_id.
+    Handles payment.captured / payment.authorized / payment.failed / refund.processed."""
     raw = await request.body()
     sig = request.headers.get("X-Razorpay-Signature", "")
     if not razorpay_verify_webhook(raw, sig):
@@ -916,29 +946,234 @@ async def razorpay_webhook(request: Request):
     except Exception:
         raise HTTPException(400, "Invalid payload")
     event = payload.get("event", "")
-    entity = (
-        payload.get("payload", {})
-        .get("payment", {})
-        .get("entity", {})
-    )
-    rzp_order_id = entity.get("order_id")
-    rzp_payment_id = entity.get("id")
+    payload_body = payload.get("payload", {})
+
+    # ---- refund.processed ----
+    if event.startswith("refund."):
+        refund_entity = payload_body.get("refund", {}).get("entity", {})
+        rzp_payment_id = refund_entity.get("payment_id")
+        refund_id = refund_entity.get("id")
+        amount_paise = int(refund_entity.get("amount") or 0)
+        status = refund_entity.get("status") or event.split(".", 1)[-1]
+        if rzp_payment_id and refund_id:
+            await record_refund(
+                db, razorpay_payment_id=rzp_payment_id, refund_id=refund_id,
+                amount_paise=amount_paise, status=status,
+            )
+        return {"ok": True, "event": event}
+
+    # ---- payment.* ----
+    payment_entity = payload_body.get("payment", {}).get("entity", {})
+    rzp_order_id = payment_entity.get("order_id")
+    rzp_payment_id = payment_entity.get("id")
+    amount_paise = int(payment_entity.get("amount") or 0)
+    method = payment_entity.get("method")
     if not rzp_order_id:
         return {"ok": True, "skipped": True}
-    status_map = {
-        "payment.captured": ("paid", "confirmed"),
-        "payment.authorized": ("paid", "confirmed"),
-        "payment.failed": ("failed", "placed"),
-    }
-    new_pay, new_status = status_map.get(event, (None, None))
-    update: dict = {"razorpay_payment_id": rzp_payment_id} if rzp_payment_id else {}
-    if new_pay:
-        update["payment_status"] = new_pay
-        update["status"] = new_status
-    if update:
-        await db.orders.update_one({"razorpay_order_id": rzp_order_id}, {"$set": update})
+    order = await db.orders.find_one({"razorpay_order_id": rzp_order_id}, {"_id": 0})
+    if not order:
+        logger.warning("Webhook %s for unknown rzp_order_id=%s", event, rzp_order_id)
+        return {"ok": True, "skipped": True}
+
+    if event in ("payment.captured", "payment.authorized"):
+        await finalise_paid_order(
+            db, order=order,
+            razorpay_payment_id=rzp_payment_id,
+            razorpay_signature=None,
+            amount_paise=amount_paise or int(order.get("razorpay_amount_paise") or 0),
+            source="webhook",
+            method=method,
+        )
+    elif event == "payment.failed":
+        await mark_payment_failed(
+            db, order=order, razorpay_payment_id=rzp_payment_id,
+            reason=(payment_entity.get("error_description") or "razorpay_failed"),
+        )
     logger.info("Razorpay webhook %s applied to %s", event, rzp_order_id)
     return {"ok": True, "event": event}
+
+
+# ------------------ Payment views (history, refund, invoice) ------------------
+@api.get("/payments")
+async def list_my_payments(user: User = Depends(get_current_user)):
+    """Buyer's payment history (own only). Admin sees all."""
+    query = {} if user.role == "admin" else {"user_id": user.user_id}
+    docs = await db.payments.find(query, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return docs
+
+
+@api.get("/admin/payments")
+async def admin_list_payments(
+    status: Optional[str] = None,
+    user: User = Depends(get_current_user),
+):
+    if user.role != "admin":
+        raise HTTPException(403, "Admin only")
+    q: dict = {}
+    if status:
+        q["status"] = status
+    docs = await db.payments.find(q, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return docs
+
+
+@api.get("/farmer/payments")
+async def farmer_received_payments(user: User = Depends(get_current_user)):
+    """List payments containing this farmer's products. Adds settlement_status."""
+    if user.role not in ("farmer", "admin"):
+        raise HTTPException(403, "Farmer only")
+    my_pids = [
+        p["product_id"]
+        async for p in db.products.find(
+            {"farmer_id": user.user_id}, {"_id": 0, "product_id": 1}
+        )
+    ]
+    if not my_pids:
+        return []
+    my_orders = await db.orders.find(
+        {"items.product_id": {"$in": my_pids}, "payment_status": {"$in": ["paid", "refunded"]}},
+        {"_id": 0, "order_id": 1, "items": 1, "buyer_name": 1},
+    ).to_list(1000)
+    oid_to_order = {o["order_id"]: o for o in my_orders}
+    payments = await db.payments.find(
+        {"order_id": {"$in": list(oid_to_order.keys())}, "status": {"$in": ["captured", "refunded"]}},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(1000)
+    # Per-payment: only include the portion that belongs to this farmer.
+    out: list = []
+    for pmt in payments:
+        order = oid_to_order.get(pmt["order_id"])
+        if not order:
+            continue
+        farmer_amount = sum(
+            (it.get("qty") or 0) * (it.get("price") or 0)
+            for it in order.get("items", [])
+            if it.get("product_id") in my_pids
+        )
+        out.append({
+            **pmt,
+            "farmer_amount": farmer_amount,
+            "buyer_name": order.get("buyer_name"),
+        })
+    return out
+
+
+@api.post("/admin/payments/{rzp_payment_id}/refund")
+async def admin_refund(
+    rzp_payment_id: str, req: RefundReq,
+    user: User = Depends(get_current_user),
+):
+    if user.role != "admin":
+        raise HTTPException(403, "Admin only")
+    if not razorpay_enabled():
+        raise HTTPException(400, "Razorpay not configured")
+    pmt = await db.payments.find_one({"razorpay_payment_id": rzp_payment_id}, {"_id": 0})
+    if not pmt:
+        raise HTTPException(404, "Payment not found")
+    if pmt.get("status") != "captured":
+        raise HTTPException(400, f"Cannot refund a payment with status={pmt.get('status')}")
+    amount_paise: Optional[int] = None
+    if req.amount is not None:
+        amount_paise = int(round(req.amount * 100))
+        if amount_paise <= 0 or amount_paise > int(pmt.get("amount_paise") or 0):
+            raise HTTPException(400, "Invalid refund amount")
+    try:
+        refund = razorpay_refund_payment(
+            rzp_payment_id, amount_paise=amount_paise,
+            notes={"reason": req.reason or "admin_refund", "admin_id": user.user_id},
+        )
+    except Exception as e:
+        logger.exception("Razorpay refund failed")
+        raise HTTPException(502, f"Refund failed: {e}")
+    await record_refund(
+        db,
+        razorpay_payment_id=rzp_payment_id,
+        refund_id=refund["id"],
+        amount_paise=int(refund.get("amount") or amount_paise or pmt["amount_paise"]),
+        status=refund.get("status", "processed"),
+    )
+    return {"ok": True, "refund_id": refund["id"], "status": refund.get("status")}
+
+
+@api.get("/orders/{oid}/invoice")
+async def download_invoice(oid: str, user: User = Depends(get_current_user)):
+    """Streaming PDF invoice. Buyer or admin only. Only generated for paid orders."""
+    order = await db.orders.find_one({"order_id": oid}, {"_id": 0})
+    if not order:
+        raise HTTPException(404, "Not found")
+    if user.role != "admin" and order["buyer_id"] != user.user_id:
+        raise HTTPException(403, "Forbidden")
+    if order.get("payment_status") not in ("paid", "refunded"):
+        raise HTTPException(400, "Invoice only available after payment")
+    payment = await db.payments.find_one({"order_id": oid}, {"_id": 0})
+    pdf = generate_invoice_pdf(order, payment)
+    return Response(
+        content=pdf, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="invoice_{oid}.pdf"'},
+    )
+
+
+@api.post("/orders/{oid}/retry-payment")
+async def retry_payment(oid: str, user: User = Depends(get_current_user)):
+    """Re-create a fresh Razorpay order for a previously failed order. Returns
+    the new razorpay_order_id so the frontend can re-open the checkout modal."""
+    order = await db.orders.find_one({"order_id": oid}, {"_id": 0})
+    if not order:
+        raise HTTPException(404, "Not found")
+    if order["buyer_id"] != user.user_id:
+        raise HTTPException(403, "Forbidden")
+    if order.get("payment_status") == "paid":
+        raise HTTPException(400, "Already paid")
+    if order.get("payment_method") == "cod":
+        raise HTTPException(400, "COD orders cannot be retried via gateway")
+    amount_paise = int(order.get("razorpay_amount_paise") or 0)
+    if amount_paise < 100:
+        raise HTTPException(400, "Invalid order amount")
+    if razorpay_enabled():
+        try:
+            rzp = razorpay_create_order(
+                amount_paise, receipt=oid,
+                notes={"buyer_id": user.user_id, "retry_for": oid},
+            )
+            new_id = rzp["id"]
+        except Exception as e:
+            logger.exception("retry-payment: gateway error")
+            raise HTTPException(502, f"Gateway error: {e}")
+    else:
+        new_id = f"order_mock_{uuid.uuid4().hex[:14]}"
+    await db.orders.update_one(
+        {"order_id": oid},
+        {"$set": {"razorpay_order_id": new_id, "payment_status": "pending"}},
+    )
+    return {"order_id": oid, "razorpay_order_id": new_id, "razorpay_amount_paise": amount_paise}
+
+
+# ------------------ Notifications ------------------
+@api.get("/notifications")
+async def list_notifications(user: User = Depends(get_current_user)):
+    docs = await db.notifications.find(
+        {"user_id": user.user_id}, {"_id": 0}
+    ).sort("created_at", -1).limit(100).to_list(100)
+    unread = sum(1 for n in docs if not n.get("read"))
+    return {"items": docs, "unread": unread}
+
+
+@api.post("/notifications/{nid}/read")
+async def mark_notification_read(nid: str, user: User = Depends(get_current_user)):
+    r = await db.notifications.update_one(
+        {"notification_id": nid, "user_id": user.user_id},
+        {"$set": {"read": True}},
+    )
+    if r.matched_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+@api.post("/notifications/read-all")
+async def mark_all_read(user: User = Depends(get_current_user)):
+    await db.notifications.update_many(
+        {"user_id": user.user_id, "read": False}, {"$set": {"read": True}}
+    )
+    return {"ok": True}
 
 
 @api.get("/orders")
@@ -1128,5 +1363,6 @@ async def startup_indexes():
             await db.users.create_index("email", unique=True)
         except Exception as e:
             logger.warning("users.email unique index skipped: %s", e)
+        await ensure_payment_indexes(db)
     except Exception as e:
         logger.exception("Index creation failed: %s", e)

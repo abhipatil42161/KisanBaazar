@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { ShoppingCart, Sun, Moon, Globe, User as UserIcon, Search, Sprout, LogOut, LayoutDashboard } from "lucide-react";
 import { useState } from "react";
+import NotificationBell from "@/components/NotificationBell";
 
 export default function Header() {
   const { user, logout } = useAuth();
@@ -82,6 +83,8 @@ export default function Header() {
           <Button data-testid="theme-toggle" variant="ghost" size="icon" onClick={toggle} className="rounded-xl h-11 w-11">
             {theme === "dark" ? <Sun size={20} strokeWidth={2.5} /> : <Moon size={20} strokeWidth={2.5} />}
           </Button>
+
+          <NotificationBell />
 
           <Link to="/cart" data-testid="cart-link" className="relative">
             <Button variant="ghost" size="icon" className="rounded-xl h-11 w-11">

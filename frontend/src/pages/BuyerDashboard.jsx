@@ -1,40 +1,45 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { getJson } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
-import { ShoppingBag, Heart, Package } from "lucide-react";
+import { ShoppingBag, Heart, Package, Receipt } from "lucide-react";
 import { Link } from "react-router-dom";
+import { Button } from "@/components/ui/button";
+import PaymentHistoryList, {
+  downloadInvoice, retryFailedPayment, fetchMyPayments,
+} from "@/components/PaymentHistoryList";
+import { Download, RotateCcw } from "lucide-react";
 
-// Module-scope fetcher.
 const fetchBuyerData = () =>
   Promise.all([
     getJson("/dashboard/stats"),
     getJson("/orders"),
     getJson("/wishlist"),
-  ]).then(([stats, orders, wishlist]) => ({ stats, orders, wishlist }));
+    fetchMyPayments(),
+  ]).then(([stats, orders, wishlist, payments]) => ({ stats, orders, wishlist, payments }));
 
 export default function BuyerDashboard() {
   const { user } = useAuth();
-  const [data, setData] = useState({ stats: {}, orders: [], wishlist: [] });
+  const [data, setData] = useState({ stats: {}, orders: [], wishlist: [], payments: [] });
 
-  useEffect(() => {
-    fetchBuyerData().then(setData);
-  }, [setData]);
+  const reload = useCallback(() => { fetchBuyerData().then(setData); }, []);
+  useEffect(() => { reload(); }, [reload]);
 
-  const { stats, orders } = data;
+  const { stats, orders, payments } = data;
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <h1 className="font-heading font-bold text-3xl">Welcome back, {user.name}</h1>
       <p className="text-muted-foreground mt-1">Your orders, saved products & insights.</p>
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-6 mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mt-6 mb-8">
         <Stat icon={ShoppingBag} label="Total Orders" value={stats.orders || 0} color="bg-primary" />
         <Stat icon={Heart} label="Wishlist" value={stats.wishlist || 0} color="bg-rose-500" />
         <Stat icon={Package} label="Pending" value={orders.filter((o) => o.status === "placed").length} color="bg-amber-500" />
+        <Stat icon={Receipt} label="Payments" value={payments.length} color="bg-emerald-600" />
       </div>
 
       <h2 className="font-heading font-semibold text-xl mb-3">My Orders</h2>
-      <div className="space-y-3">
+      <div className="space-y-3 mb-10">
         {orders.length === 0 && <p className="text-muted-foreground">No orders yet. <Link to="/products" className="text-primary font-semibold">Start shopping</Link></p>}
         {orders.map((o) => (
           <div key={o.order_id} data-testid={`order-${o.order_id}`} className="bg-card border-2 border-border rounded-2xl p-5">
@@ -44,14 +49,31 @@ export default function BuyerDashboard() {
                 <div className="text-xs text-muted-foreground">{new Date(o.created_at).toLocaleString()}</div>
               </div>
               <div className="text-right">
-                <div className="font-heading font-bold text-xl text-primary">₹{o.total.toLocaleString()}</div>
+                <div className="font-heading font-bold text-xl text-primary">₹{(o.charge_total ?? o.total).toLocaleString()}</div>
                 <div className="text-xs capitalize">{o.status} · {o.payment_status}</div>
               </div>
             </div>
             <div className="mt-3 text-sm text-muted-foreground">{o.items.map((it) => `${it.title} × ${it.qty}`).join(" · ")}</div>
+            <div className="flex gap-2 mt-3">
+              {o.payment_status === "paid" && (
+                <Button data-testid={`order-invoice-${o.order_id}`} size="sm" variant="outline"
+                  onClick={() => downloadInvoice(o.order_id)} className="rounded-xl">
+                  <Download size={14} className="mr-1" /> Download invoice
+                </Button>
+              )}
+              {o.payment_status === "failed" && (
+                <Button data-testid={`order-retry-${o.order_id}`} size="sm"
+                  onClick={() => retryFailedPayment(o, { user, onPaid: reload })} className="rounded-xl">
+                  <RotateCcw size={14} className="mr-1" /> Retry payment
+                </Button>
+              )}
+            </div>
           </div>
         ))}
       </div>
+
+      <h2 className="font-heading font-semibold text-xl mb-3">Payment History</h2>
+      <PaymentHistoryList payments={payments} role="buyer" />
     </div>
   );
 }

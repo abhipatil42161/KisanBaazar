@@ -94,3 +94,18 @@ def verify_webhook_signature(raw_body: bytes, signature_header: str) -> bool:
         WEBHOOK_SECRET.encode("utf-8"), raw_body, hashlib.sha256
     ).hexdigest()
     return hmac.compare_digest(expected, signature_header.strip())
+
+
+def fetch_payment(payment_id: str) -> dict:
+    """Fetch a payment entity from Razorpay (used to enrich our records)."""
+    return _client_or_raise().payment.fetch(payment_id)
+
+
+def refund_payment(payment_id: str, amount_paise: int | None = None, notes: dict | None = None) -> dict:
+    """Issue a refund. amount_paise=None refunds the full captured amount."""
+    payload: dict = {}
+    if amount_paise:
+        payload["amount"] = int(amount_paise)
+    if notes:
+        payload["notes"] = {k: str(v)[:256] for k, v in notes.items() if v is not None}
+    return _client_or_raise().payment.refund(payment_id, payload)
