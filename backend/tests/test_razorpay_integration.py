@@ -14,7 +14,6 @@ import sys
 import hmac
 import hashlib
 import uuid
-import importlib
 from pathlib import Path
 import pytest
 import requests
@@ -158,10 +157,10 @@ class TestWebhookSignature:
         reload(razorpay_service)
         body = b'{"event":"payment.captured"}'
         good = hmac.new(b"unit_test_secret", body, hashlib.sha256).hexdigest()
-        assert razorpay_service.verify_webhook_signature(body, good) is True
-        assert razorpay_service.verify_webhook_signature(body, "x" + good[1:]) is False
-        assert razorpay_service.verify_webhook_signature(b"", good) is False
-        assert razorpay_service.verify_webhook_signature(body, "") is False
+        assert razorpay_service.verify_webhook_signature(body, good)
+        assert not razorpay_service.verify_webhook_signature(body, "x" + good[1:])
+        assert not razorpay_service.verify_webhook_signature(b"", good)
+        assert not razorpay_service.verify_webhook_signature(body, "")
 
 
 # ---------- Payment signature math (unit) ----------
@@ -177,9 +176,9 @@ class TestPaymentSignatureMath:
         oid = "order_abc123"
         pid = "pay_xyz456"
         good = hmac.new(b"unit_secret", f"{oid}|{pid}".encode(), hashlib.sha256).hexdigest()
-        assert razorpay_service.verify_payment_signature(oid, pid, good) is True
-        assert razorpay_service.verify_payment_signature(oid, pid, "0" * 64) is False
-        assert razorpay_service.verify_payment_signature("", pid, good) is False
+        assert razorpay_service.verify_payment_signature(oid, pid, good)
+        assert not razorpay_service.verify_payment_signature(oid, pid, "0" * 64)
+        assert not razorpay_service.verify_payment_signature("", pid, good)
 
 
 # ---------- Mock-pay guard rails ----------
@@ -197,7 +196,7 @@ class TestMockPayGuard:
             timeout=15,
         )
         assert p.status_code == 200
-        assert p.json()["ok"] is True
+        assert p.json()["ok"]
         # If gateway disabled, non-COD mock-pay should also work
         if not cfg["enabled"]:
             r2 = _place_order(buyer_session, method="upi")

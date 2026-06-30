@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import axios from "axios";
 import { api } from "@/lib/api";
+import { logger } from "@/lib/logger";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
@@ -95,7 +96,7 @@ export default function ImageUploader({ value = [], onChange, max = MAX_IMG_COUN
     onChange((prev) => (prev || []).filter((_, i) => i !== idx));
     if (img && typeof img === "object" && img.public_id) {
       try { await api.delete("/cloudinary/image", { data: { public_id: img.public_id } }); }
-      catch { /* best-effort; image already detached client-side */ }
+      catch (err) { logger.warn("[image-uploader] orphan delete failed", img.public_id, err?.message); }
     }
   };
 

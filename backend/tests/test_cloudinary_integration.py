@@ -245,14 +245,14 @@ class TestCloudinaryDeletePermissions:
         # POST-FIX: Farmer CAN delete their own orphan because public_id lives under their user folder
         r1 = farmer_sess.delete(f"{BASE_URL}/api/cloudinary/image", json={"public_id": pub_id})
         assert r1.status_code == 200, f"farmer should be able to delete own orphan asset post-fix: {r1.text}"
-        assert r1.json().get("ok") is True
+        assert r1.json().get("ok")
 
         # Upload another orphan as farmer to verify admin-can-delete-others-orphan path
         ur2 = requests.post(UPLOAD_URL, files={"file": ("admin_del2.png", _tiny_png_bytes(), "image/png")}, data=data, timeout=30).json()
         pub_id2 = ur2["public_id"]
         r2 = admin_sess.delete(f"{BASE_URL}/api/cloudinary/image", json={"public_id": pub_id2})
         assert r2.status_code == 200, r2.text
-        assert r2.json()["ok"] is True
+        assert r2.json()["ok"]
 
     def test_cross_user_cannot_delete_others_orphan(self, farmer_sess, buyer_sess):
         """Buyer must NOT be able to delete farmer's orphan (ownership fix is per-user folder, not permissive)."""
