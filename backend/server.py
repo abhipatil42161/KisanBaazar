@@ -941,6 +941,7 @@ async def razorpay_webhook(request: Request):
     sig = request.headers.get("X-Razorpay-Signature", "")
     if not razorpay_verify_webhook(raw, sig):
         raise HTTPException(400, "Invalid webhook signature")
+    payload: dict = {}
     try:
         payload = await request.json()
     except Exception:
@@ -1081,17 +1082,19 @@ async def admin_refund(
             rzp_payment_id, amount_paise=amount_paise,
             notes={"reason": req.reason or "admin_refund", "admin_id": user.user_id},
         )
+        await record_refund(
+            db,
+            razorpay_payment_id=rzp_payment_id,
+            refund_id=refund["id"],
+            amount_paise=int(refund.get("amount") or amount_paise or pmt["amount_paise"]),
+            status=refund.get("status", "processed"),
+        )
+        return {"ok": True, "refund_id": refund["id"], "status": refund.get("status")}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Razorpay refund failed")
         raise HTTPException(502, f"Refund failed: {e}")
-    await record_refund(
-        db,
-        razorpay_payment_id=rzp_payment_id,
-        refund_id=refund["id"],
-        amount_paise=int(refund.get("amount") or amount_paise or pmt["amount_paise"]),
-        status=refund.get("status", "processed"),
-    )
-    return {"ok": True, "refund_id": refund["id"], "status": refund.get("status")}
 
 
 @api.get("/orders/{oid}/invoice")

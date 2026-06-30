@@ -36,9 +36,11 @@ def _client_or_raise() -> razorpay.Client:
     global _client
     if not is_enabled():
         raise RuntimeError("Razorpay not configured")
-    if _client is None:
-        _client = razorpay.Client(auth=(KEY_ID, KEY_SECRET))
-    return _client
+    client = _client
+    if client is None:
+        client = razorpay.Client(auth=(KEY_ID, KEY_SECRET))
+        _client = client
+    return client
 
 
 def public_config() -> dict:

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -56,14 +56,14 @@ export default function Checkout() {
       .catch(() => setPayCfg({ enabled: false, key_id: null }));
   }, []);
 
-  const finishMock = async (order) => {
+  const finishMock = useCallback(async (order) => {
     await api.post(`/orders/${order.order_id}/pay`);
     setOrderId(order.order_id);
     clear();
     toast.success(method === "cod" ? "Order placed — pay on delivery" : "Payment successful!");
-  };
+  }, [method, clear]);
 
-  const finishRazorpay = async (order) => {
+  const finishRazorpay = useCallback(async (order) => {
     const loaded = await loadRazorpay();
     if (!loaded) { toast.error("Could not load Razorpay. Check your connection."); return; }
     return new Promise((resolve, reject) => {
@@ -110,9 +110,9 @@ export default function Checkout() {
       });
       rzp.open();
     });
-  };
+  }, [payCfg, user, phone, clear]);
 
-  const placeOrder = async () => {
+  const placeOrder = useCallback(async () => {
     if (!addr.trim() || !phone.trim()) { toast.error("Please fill address and phone"); return; }
     if (items.length === 0) { toast.error("Cart is empty"); return; }
     setBusy(true);
@@ -137,7 +137,7 @@ export default function Checkout() {
     } finally {
       setBusy(false);
     }
-  };
+  }, [addr, phone, items, method, payCfg, finishMock, finishRazorpay]);
 
   if (orderId) {
     return (
