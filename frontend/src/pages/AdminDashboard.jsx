@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { getJson } from "@/lib/api";
-import { Users, Package, ShoppingBag, IndianRupee } from "lucide-react";
+import { Users, Package, ShoppingBag, IndianRupee, Search } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import PaymentHistoryList, { fetchAdminPayments } from "@/components/PaymentHistoryList";
 
 const fetchAdminData = () =>
@@ -10,11 +11,20 @@ const fetchAdminData = () =>
 export default function AdminDashboard() {
   const [data, setData] = useState({ stats: {}, orders: [], payments: [] });
   const [tab, setTab] = useState("all"); // all | captured | failed | refunded
+  const [q, setQ] = useState("");
   const reload = useCallback(() => { fetchAdminData().then(setData); }, []);
   useEffect(() => { reload(); }, [reload]);
 
   const { stats, orders, payments } = data;
-  const filtered = tab === "all" ? payments : payments.filter((p) => p.status === tab);
+  const needle = q.trim().toLowerCase();
+  const filtered = payments
+    .filter((p) => tab === "all" || p.status === tab)
+    .filter((p) => !needle
+      || (p.order_id || "").toLowerCase().includes(needle)
+      || (p.razorpay_payment_id || "").toLowerCase().includes(needle)
+      || (p.razorpay_order_id || "").toLowerCase().includes(needle)
+      || (p.buyer_name || "").toLowerCase().includes(needle)
+      || (p.method || "").toLowerCase().includes(needle));
   const TABS = [
     { id: "all", label: `All (${payments.length})` },
     { id: "captured", label: `Captured (${payments.filter((p) => p.status === "captured").length})` },
@@ -58,15 +68,32 @@ export default function AdminDashboard() {
       </div>
 
       <h2 className="font-heading font-semibold text-xl mb-3">Payment Management</h2>
-      <div className="flex gap-2 mb-4 flex-wrap" data-testid="admin-payment-tabs">
-        {TABS.map((t) => (
-          <button key={t.id} data-testid={`admin-payment-tab-${t.id}`}
-            onClick={() => setTab(t.id)}
-            className={`px-4 h-9 rounded-xl text-sm font-medium transition-colors ${
-              tab === t.id ? "bg-primary text-primary-foreground" : "bg-muted hover:bg-muted/70"
-            }`}>{t.label}</button>
-        ))}
+      <div className="flex flex-col sm:flex-row gap-3 mb-4">
+        <div className="relative flex-1">
+          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            data-testid="admin-payment-search"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search by order ID, payment ID, buyer name, or method…"
+            className="pl-9 h-10 rounded-xl"
+          />
+        </div>
+        <div className="flex gap-2 flex-wrap" data-testid="admin-payment-tabs">
+          {TABS.map((t) => (
+            <button key={t.id} data-testid={`admin-payment-tab-${t.id}`}
+              onClick={() => setTab(t.id)}
+              className={`px-4 h-10 rounded-xl text-sm font-medium transition-colors ${
+                tab === t.id ? "bg-primary text-primary-foreground" : "bg-muted hover:bg-muted/70"
+              }`}>{t.label}</button>
+          ))}
+        </div>
       </div>
+      {needle && (
+        <p className="text-xs text-muted-foreground mb-3" data-testid="admin-payment-result-count">
+          {filtered.length} of {payments.length} matching "{q}"
+        </p>
+      )}
       <PaymentHistoryList payments={filtered} role="admin" onRefund={reload} />
     </div>
   );

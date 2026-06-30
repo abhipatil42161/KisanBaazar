@@ -129,6 +129,16 @@ export default function PaymentHistoryList({ payments, role = "buyer", onRefund 
                   ? `Your share: ₹${p.farmer_amount.toLocaleString()}`
                   : `₹${(p.amount || 0).toLocaleString()}`}
                 <span className="text-xs text-muted-foreground ml-2">{meta.label}</span>
+                {role === "farmer" && (
+                  <span data-testid={`settlement-${p.order_id}`}
+                    className={`ml-2 text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full font-semibold ${
+                      p.settlement_status === "settled"
+                        ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+                        : "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+                    }`}>
+                    {p.settlement_status === "settled" ? "Settled" : "Settlement pending"}
+                  </span>
+                )}
               </div>
               <div className="text-xs text-muted-foreground mt-1">
                 Order <span className="font-mono">{p.order_id}</span>
