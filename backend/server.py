@@ -44,6 +44,15 @@ from payments_service import (  # noqa: E402
     record_refund,
 )
 from invoice_service import generate_invoice_pdf  # noqa: E402
+from reviews_service import (  # noqa: E402
+    ensure_indexes as ensure_review_indexes,
+    create_review as svc_create_review,
+    update_review as svc_update_review,
+    reply_to_review as svc_reply_review,
+    report_review as svc_report_review,
+    moderate_review as svc_moderate_review,
+    buyer_can_review,
+)
 
 MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
@@ -167,6 +176,8 @@ class Product(BaseModel):
     auction: bool = False
     auction_end: Optional[str] = None
     current_bid: Optional[float] = None
+    rating_avg: Optional[float] = 0.0
+    rating_count: Optional[int] = 0
     created_at: str
 
 
@@ -240,6 +251,34 @@ class PaymentVerifyReq(BaseModel):
 class RefundReq(BaseModel):
     amount: Optional[float] = None  # full refund when None
     reason: Optional[str] = None
+
+
+class ReviewCreateReq(BaseModel):
+    order_id: str
+    product_id: str
+    rating: int
+    title: Optional[str] = ""
+    body: Optional[str] = ""
+    images: List = []
+
+
+class ReviewUpdateReq(BaseModel):
+    rating: Optional[int] = None
+    title: Optional[str] = None
+    body: Optional[str] = None
+    images: Optional[List] = None
+
+
+class ReviewReplyReq(BaseModel):
+    body: str
+
+
+class ReviewReportReq(BaseModel):
+    reason: Optional[str] = "inappropriate"
+
+
+class ReviewModerateReq(BaseModel):
+    action: Literal["publish", "hide", "delete"]
 
 
 # ------------------ Helpers ------------------
@@ -1179,6 +1218,153 @@ async def mark_all_read(user: User = Depends(get_current_user)):
     return {"ok": True}
 
 
+# ------------------ Ratings & Reviews ------------------
+@api.get("/reviews/eligible")
+async def list_eligible_reviewable(user: User = Depends(get_current_user)):
+    """Return paid orders where the buyer has unreviewed line items.
+    Used by the Buyer Dashboard 'Write a review' surface."""
+    paid_orders = await db.orders.find(
+        {"buyer_id": user.user_id, "payment_status": "paid"}, {"_id": 0}
+    ).sort("created_at", -1).to_list(200)
+    reviewed = await db.reviews.find(
+        {"buyer_id": user.user_id}, {"_id": 0, "order_id": 1, "product_id": 1}
+    ).to_list(1000)
+    reviewed_keys = {(r["order_id"], r["product_id"]) for r in reviewed}
+    out: list = []
+    for o in paid_orders:
+        for it in o.get("items", []):
+            pid = it.get("product_id")
+            if pid and (o["order_id"], pid) not in reviewed_keys:
+                out.append({
+                    "order_id": o["order_id"],
+                    "product_id": pid,
+                    "product_title": it.get("title"),
+                    "product_image": it.get("image"),
+                    "created_at": o.get("created_at"),
+                })
+    return out
+
+
+@api.post("/reviews")
+async def post_review(req: ReviewCreateReq, user: User = Depends(get_current_user)):
+    try:
+        rev = await svc_create_review(
+            db,
+            buyer_id=user.user_id, buyer_name=user.name,
+            order_id=req.order_id, product_id=req.product_id,
+            rating=req.rating, title=req.title or "", body=req.body or "",
+            images=req.images or [],
+        )
+    except ValueError as e:
+        msg = str(e)
+        code = 400 if msg in ("invalid_rating",) else 403 if msg == "not_eligible" else 404
+        raise HTTPException(code, msg)
+    return rev
+
+
+@api.put("/reviews/{rid}")
+async def edit_review(rid: str, req: ReviewUpdateReq, user: User = Depends(get_current_user)):
+    try:
+        return await svc_update_review(
+            db, review_id=rid, buyer_id=user.user_id,
+            rating=req.rating, title=req.title, body=req.body, images=req.images,
+        )
+    except ValueError as e:
+        msg = str(e)
+        code = 404 if msg == "not_found" else 403 if msg == "forbidden" else 400
+        raise HTTPException(code, msg)
+
+
+@api.get("/products/{pid}/reviews")
+async def list_product_reviews(pid: str):
+    docs = await db.reviews.find(
+        {"product_id": pid, "status": "published"}, {"_id": 0, "reports": 0},
+    ).sort("created_at", -1).to_list(200)
+    return docs
+
+
+@api.get("/farmers/{fid}/reviews")
+async def list_farmer_reviews(fid: str):
+    docs = await db.reviews.find(
+        {"farmer_id": fid, "status": "published"}, {"_id": 0, "reports": 0},
+    ).sort("created_at", -1).to_list(200)
+    return docs
+
+
+@api.get("/farmer/reviews")
+async def my_farmer_reviews(user: User = Depends(get_current_user)):
+    """Farmer view: every review on their products (incl. reported/hidden) so
+    they can see + reply. Reply gating is enforced server-side on POST."""
+    if user.role not in ("farmer", "admin"):
+        raise HTTPException(403, "Farmer only")
+    docs = await db.reviews.find(
+        {"farmer_id": user.user_id}, {"_id": 0, "reports": 0},
+    ).sort("created_at", -1).to_list(500)
+    if docs:
+        pids = list({d["product_id"] for d in docs})
+        titles = {p["product_id"]: p.get("title", "") async for p in
+                  db.products.find({"product_id": {"$in": pids}}, {"_id": 0, "product_id": 1, "title": 1})}
+        for d in docs:
+            d["product_title"] = titles.get(d["product_id"], "")
+    return docs
+
+
+@api.post("/reviews/{rid}/reply")
+async def reply_review(rid: str, req: ReviewReplyReq, user: User = Depends(get_current_user)):
+    if user.role != "farmer":
+        raise HTTPException(403, "Only the farmer can reply")
+    try:
+        return await svc_reply_review(db, review_id=rid, farmer_id=user.user_id, body=req.body)
+    except ValueError as e:
+        msg = str(e)
+        code = 404 if msg == "not_found" else 403 if msg == "forbidden" else 400
+        raise HTTPException(code, msg)
+
+
+@api.post("/reviews/{rid}/report")
+async def report_review(rid: str, req: ReviewReportReq, user: User = Depends(get_current_user)):
+    try:
+        rev = await svc_report_review(
+            db, review_id=rid, reporter_id=user.user_id, reason=req.reason or "inappropriate",
+        )
+    except ValueError as e:
+        msg = str(e)
+        code = 404 if msg == "not_found" else 409 if msg == "already_reported" else 400
+        raise HTTPException(code, msg)
+    return {"ok": True, "status": rev.get("status")}
+
+
+@api.get("/admin/reviews")
+async def admin_list_reviews(
+    status: Optional[str] = None,
+    user: User = Depends(get_current_user),
+):
+    if user.role != "admin":
+        raise HTTPException(403, "Admin only")
+    q: dict = {}
+    if status:
+        q["status"] = status
+    docs = await db.reviews.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    if docs:
+        pids = list({d["product_id"] for d in docs})
+        titles = {p["product_id"]: p.get("title", "") async for p in
+                  db.products.find({"product_id": {"$in": pids}}, {"_id": 0, "product_id": 1, "title": 1})}
+        for d in docs:
+            d["product_title"] = titles.get(d["product_id"], "")
+    return docs
+
+
+@api.post("/admin/reviews/{rid}/moderate")
+async def admin_moderate(rid: str, req: ReviewModerateReq, user: User = Depends(get_current_user)):
+    if user.role != "admin":
+        raise HTTPException(403, "Admin only")
+    try:
+        result = await svc_moderate_review(db, review_id=rid, action=req.action)
+    except ValueError as e:
+        raise HTTPException(404 if str(e) == "not_found" else 400, str(e))
+    return {"ok": True, "deleted": result is None, "review": result}
+
+
 @api.get("/orders")
 async def list_orders(user: User = Depends(get_current_user)):
     docs: list = []
@@ -1367,5 +1553,6 @@ async def startup_indexes():
         except Exception as e:
             logger.warning("users.email unique index skipped: %s", e)
         await ensure_payment_indexes(db)
+        await ensure_review_indexes(db)
     except Exception as e:
         logger.exception("Index creation failed: %s", e)

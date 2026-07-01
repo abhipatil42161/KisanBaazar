@@ -1,21 +1,28 @@
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useFarmerData } from "@/hooks/useFarmerData";
+import { api } from "@/lib/api";
 import FarmerStats from "@/components/farmer/FarmerStats";
 import FarmerListings from "@/components/farmer/FarmerListings";
 import FarmerOrders from "@/components/farmer/FarmerOrders";
 import ProductFormDialog from "@/components/farmer/AddProductDialog";
 import PaymentHistoryList, { fetchFarmerPayments } from "@/components/PaymentHistoryList";
+import ReviewList from "@/components/ReviewList";
+import { MessageSquare } from "lucide-react";
 
 export default function FarmerDashboard() {
   const { user } = useAuth();
   const { stats, products, orders, cats, reload } = useFarmerData(user.user_id);
   const [payments, setPayments] = useState([]);
+  const [reviews, setReviews] = useState([]);
 
   const loadPayments = useCallback(() => {
     fetchFarmerPayments().then(setPayments).catch(() => setPayments([]));
   }, []);
-  useEffect(() => { loadPayments(); }, [loadPayments]);
+  const loadReviews = useCallback(() => {
+    api.get("/farmer/reviews").then((r) => setReviews(r.data || [])).catch(() => setReviews([]));
+  }, []);
+  useEffect(() => { loadPayments(); loadReviews(); }, [loadPayments, loadReviews]);
 
   const totalEarned = payments
     .filter((p) => p.status === "captured")
@@ -60,6 +67,15 @@ export default function FarmerDashboard() {
         </div>
       </div>
       <PaymentHistoryList payments={payments} role="farmer" />
+
+      <h2 className="font-heading font-semibold text-xl mt-10 mb-3 flex items-center gap-2">
+        <MessageSquare className="text-primary" size={20} />
+        Customer Reviews
+        <span className="text-xs text-muted-foreground font-normal">
+          ({reviews.length} total · {reviews.filter((r) => !r.reply).length} awaiting reply)
+        </span>
+      </h2>
+      <ReviewList reviews={reviews} role="farmer" onChange={loadReviews} showProductTitle />
     </div>
   );
 }

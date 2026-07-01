@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { getJson } from "@/lib/api";
-import { Users, Package, ShoppingBag, IndianRupee, Search } from "lucide-react";
+import { getJson, api } from "@/lib/api";
+import { Users, Package, ShoppingBag, IndianRupee, Search, ShieldAlert } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import PaymentHistoryList, { fetchAdminPayments } from "@/components/PaymentHistoryList";
+import ReviewList from "@/components/ReviewList";
 
 const fetchAdminData = () =>
   Promise.all([getJson("/dashboard/stats"), getJson("/orders"), fetchAdminPayments()])
@@ -12,8 +13,14 @@ export default function AdminDashboard() {
   const [data, setData] = useState({ stats: {}, orders: [], payments: [] });
   const [tab, setTab] = useState("all"); // all | captured | failed | refunded
   const [q, setQ] = useState("");
+  const [reviews, setReviews] = useState([]);
   const reload = useCallback(() => { fetchAdminData().then(setData); }, []);
-  useEffect(() => { reload(); }, [reload]);
+  const loadReviews = useCallback(() => {
+    api.get("/admin/reviews?status=reported")
+      .then((r) => setReviews(r.data || []))
+      .catch(() => setReviews([]));
+  }, []);
+  useEffect(() => { reload(); loadReviews(); }, [reload, loadReviews]);
 
   const { stats, orders, payments } = data;
   const needle = q.trim().toLowerCase();
@@ -95,6 +102,13 @@ export default function AdminDashboard() {
         </p>
       )}
       <PaymentHistoryList payments={filtered} role="admin" onRefund={reload} />
+
+      <h2 className="font-heading font-semibold text-xl mb-3 mt-10 flex items-center gap-2">
+        <ShieldAlert className="text-amber-500" size={20} />
+        Review Moderation
+        <span className="text-xs text-muted-foreground font-normal">({reviews.length} reported)</span>
+      </h2>
+      <ReviewList reviews={reviews} role="admin" onChange={loadReviews} showProductTitle />
     </div>
   );
 }

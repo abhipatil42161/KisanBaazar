@@ -8,8 +8,11 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useCart } from "@/contexts/CartContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
-import { MapPin, Award, Sprout, Gavel, Calendar, Truck, ShieldCheck, Plus, Minus } from "lucide-react";
+import { MapPin, Award, Sprout, Gavel, Calendar, Truck, ShieldCheck, Plus, Minus, Star } from "lucide-react";
 import { imgUrl } from "@/lib/images";
+import StarRating from "@/components/StarRating";
+import ReviewList from "@/components/ReviewList";
+import ReviewForm from "@/components/ReviewForm";
 
 // Module-scope: fetch + apply in one step so the hook body has zero Promise-callback params.
 const fetchAndApplyProduct = (productId, setProduct, setQty) =>
@@ -24,6 +27,8 @@ export default function ProductDetail() {
   const [p, setP] = useState(null);
   const [qty, setQty] = useState(1);
   const [bidAmt, setBidAmt] = useState("");
+  const [reviews, setReviews] = useState([]);
+  const [eligible, setEligible] = useState([]);
   const { add } = useCart();
   const { user } = useAuth();
 
@@ -31,7 +36,16 @@ export default function ProductDetail() {
     () => fetchAndApplyProduct(id, setP, setQty),
     [id, setP, setQty],
   );
-  useEffect(() => { load(); }, [load]);
+  const loadReviews = useCallback(() => {
+    getJson(`/products/${id}/reviews`).then(setReviews).catch(() => setReviews([]));
+  }, [id]);
+  const loadEligible = useCallback(() => {
+    if (!user || user.role !== "buyer") { setEligible([]); return; }
+    getJson("/reviews/eligible")
+      .then((rows) => setEligible(rows.filter((r) => r.product_id === id)))
+      .catch(() => setEligible([]));
+  }, [id, user]);
+  useEffect(() => { load(); loadReviews(); loadEligible(); }, [load, loadReviews, loadEligible]);
 
   if (!p) return <div className="max-w-7xl mx-auto p-8">Loading…</div>;
 
@@ -150,6 +164,46 @@ export default function ProductDetail() {
               Standard delivery 3–7 business days. Cold storage available for perishables. Export shipments require additional 5–10 days for customs.
             </TabsContent>
           </Tabs>
+
+          {/* Ratings & Reviews */}
+          <div className="mt-10" data-testid="reviews-section">
+            <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
+              <div>
+                <h3 className="font-heading font-semibold text-2xl">Ratings & Reviews</h3>
+                {(p.rating_count || 0) > 0 ? (
+                  <div className="flex items-center gap-2 mt-1">
+                    <StarRating value={p.rating_avg || 0} testid="product-avg" />
+                    <span className="text-sm text-muted-foreground">
+                      <span data-testid="product-rating-avg" className="font-semibold text-foreground">
+                        {(p.rating_avg || 0).toFixed(1)}
+                      </span>{" "}
+                      / 5 · <span data-testid="product-rating-count">{p.rating_count}</span> review{p.rating_count === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground mt-1 inline-flex items-center gap-1">
+                    <Star size={14} /> No ratings yet
+                  </p>
+                )}
+              </div>
+              {eligible.length > 0 && (
+                <ReviewForm
+                  eligible={eligible[0]}
+                  onSaved={() => { loadReviews(); load(); loadEligible(); }}
+                  trigger={
+                    <Button data-testid="write-review-btn" className="rounded-xl">
+                      Write a review
+                    </Button>
+                  }
+                />
+              )}
+            </div>
+            <ReviewList
+              reviews={reviews}
+              role={user?.role || "buyer"}
+              onChange={() => { loadReviews(); load(); }}
+            />
+          </div>
         </div>
       </div>
     </div>
