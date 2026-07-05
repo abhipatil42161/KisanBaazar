@@ -16,7 +16,6 @@ from pydantic import BaseModel, EmailStr, ConfigDict
 from typing import List, Optional, Literal
 from datetime import datetime, timezone, timedelta
 
-from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -53,11 +52,13 @@ from reviews_service import (  # noqa: E402
     moderate_review as svc_moderate_review,
     buyer_can_review,
 )
+from ai_service import stream_reply as ai_stream_reply, one_shot as ai_one_shot  # noqa: E402
 
 MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
 JWT_SECRET = os.environ["JWT_SECRET"]
-EMERGENT_LLM_KEY = os.environ["EMERGENT_LLM_KEY"]
+# AI key optional at boot — endpoints degrade gracefully if unset.
+EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "*")
 
 # Initialise Cloudinary (no-op if env vars missing — see cloudinary_service)
@@ -1444,24 +1445,13 @@ state-specific advice). Keep replies under 200 words unless asked for detail."""
 async def ai_chat(req: ChatReq, user: Optional[User] = Depends(optional_user)):
     sid = req.session_id or f"sess_{uuid.uuid4().hex[:10]}"
 
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=sid,
-        system_message=SYSTEM_PROMPT,
-    ).with_model("anthropic", "claude-sonnet-4-5-20250929")
-
     async def gen():
         full = ""
-        try:
-            async for ev in chat.stream_message(UserMessage(text=req.message)):
-                if isinstance(ev, TextDelta):
-                    full += ev.content
-                    yield ev.content
-                elif isinstance(ev, StreamDone):
-                    break
-        except Exception as e:
-            logger.exception("AI error")
-            yield f"\n[error: {e}]"
+        async for chunk in ai_stream_reply(
+            db=db, session_id=sid, system=SYSTEM_PROMPT, user_message=req.message
+        ):
+            full += chunk
+            yield chunk
         await db.chat_messages.insert_one(
             {
                 "session_id": sid,
@@ -1481,25 +1471,15 @@ async def ai_chat(req: ChatReq, user: Optional[User] = Depends(optional_user)):
 
 @api.post("/ai/price-predict")
 async def price_predict(req: ChatReq, user: Optional[User] = Depends(optional_user)):
-    sid = f"pp_{uuid.uuid4().hex[:8]}"
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=sid,
-        system_message="You are an Indian crop price prediction expert. Given a crop, region and season, "
-                       "estimate a fair INR/kg or INR/quintal price range with brief 2-line reasoning. "
-                       "Return: 'Suggested: ₹X-Y per <unit>. Why: ...'",
-    ).with_model("anthropic", "claude-sonnet-4-5-20250929")
-    full = ""
-    try:
-        async for ev in chat.stream_message(UserMessage(text=req.message)):
-            if isinstance(ev, TextDelta):
-                full += ev.content
-            elif isinstance(ev, StreamDone):
-                break
-    except Exception as e:
-        logger.exception("price-predict failed")
-        return {"prediction": f"Suggested: market range varies. Please check local mandi rates. (AI temporarily unavailable: {type(e).__name__})"}
-    return {"prediction": full or "No prediction available."}
+    text = await ai_one_shot(
+        system=(
+            "You are an Indian crop price prediction expert. Given a crop, region and season, "
+            "estimate a fair INR/kg or INR/quintal price range with brief 2-line reasoning. "
+            "Return: 'Suggested: ₹X-Y per <unit>. Why: ...'"
+        ),
+        user_message=req.message,
+    )
+    return {"prediction": text}
 
 
 # ------------------ Health ------------------
