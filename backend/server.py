@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import re
 import logging
 import uuid
 import secrets
@@ -12,7 +13,7 @@ import bcrypt
 import jwt as pyjwt
 import httpx
 from pathlib import Path
-from pydantic import BaseModel, EmailStr, ConfigDict
+from pydantic import BaseModel, EmailStr, ConfigDict, field_validator
 from typing import List, Optional, Literal
 from datetime import datetime, timezone, timedelta
 
@@ -53,6 +54,8 @@ from reviews_service import (  # noqa: E402
     buyer_can_review,
 )
 from ai_service import stream_reply as ai_stream_reply, one_shot as ai_one_shot  # noqa: E402
+from email_service import send_email as send_email  # noqa: E402
+import otp_service  # noqa: E402
 
 MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
@@ -83,6 +86,9 @@ COOKIE_MAX_AGE = 7 * 24 * 3600  # 7 days
 CSRF_EXEMPT_PATHS = {
     "/api/auth/login",
     "/api/auth/register",
+    "/api/auth/register/init",
+    "/api/auth/register/resend-otp",
+    "/api/auth/register/verify-otp",
     "/api/auth/google/session",
     "/api/auth/csrf",
     "/api/auth/forgot-password",
@@ -129,6 +135,108 @@ class User(BaseModel):
     picture: Optional[str] = None
     verified: bool = False
     created_at: str
+
+
+# ---------- Bilingual (Marathi/English) validation error messages ----------
+# Format: "English message | मराठी संदेश" so the frontend can split on '|' and
+# render both, or use a lang toggle. Keeps validation contract simple.
+ERR = {
+    "name_len": "Name must be 2 to 50 characters | नाव 2 ते 50 अक्षरांचे असणे आवश्यक आहे",
+    "name_chars": "Name may only contain letters, spaces, and dots | नावात फक्त अक्षरे, स्पेस आणि पूर्णविराम असू शकतात",
+    "mobile_format": "Enter a valid 10-digit Indian mobile number starting with 6-9 | 6-9 ने सुरू होणारा वैध 10-अंकी भारतीय मोबाइल नंबर टाका",
+    "pwd_short": "Password must be at least 8 characters | पासवर्ड किमान 8 अक्षरांचा असावा",
+    "pwd_upper": "Password must include an uppercase letter | पासवर्डमध्ये किमान एक कॅपिटल अक्षर असावे",
+    "pwd_lower": "Password must include a lowercase letter | पासवर्डमध्ये किमान एक लोअरकेस अक्षर असावे",
+    "pwd_digit": "Password must include a digit | पासवर्डमध्ये किमान एक अंक असावा",
+    "pwd_symbol": "Password must include a symbol (e.g., @#$!) | पासवर्डमध्ये किमान एक चिन्ह (उदा. @#$!) असावे",
+    "pwd_mismatch": "Passwords do not match | पासवर्ड जुळत नाहीत",
+    "email_taken": "This email is already registered | हा ईमेल आधीच नोंदणीकृत आहे",
+    "mobile_taken": "This mobile number is already registered | हा मोबाइल नंबर आधीच नोंदणीकृत आहे",
+    "otp_invalid": "Invalid OTP | अवैध OTP",
+    "otp_expired": "OTP has expired. Please request a new one | OTP ची मुदत संपली आहे. कृपया नवीन मागवा",
+    "otp_max": "Too many attempts. Please start again | खूप जास्त प्रयत्न. कृपया पुन्हा सुरू करा",
+    "otp_cooldown": "Please wait {s}s before requesting another OTP | दुसरा OTP मागण्यापूर्वी कृपया {s} सेकंद थांबा",
+    "session_gone": "Session expired. Please start over | सेशन संपले. कृपया पुन्हा सुरू करा",
+}
+
+MOBILE_INDIA_RE = re.compile(r"^[6-9]\d{9}$")
+NAME_RE = re.compile(r"^[A-Za-z\u0900-\u097F .]+$")  # Latin + Devanagari + space/dot
+_SYMBOLS_RE = re.compile(r"[^A-Za-z0-9]")
+
+
+def _validate_password(pw: str) -> None:
+    if len(pw) < 8:
+        raise ValueError(ERR["pwd_short"])
+    if not any(c.isupper() for c in pw):
+        raise ValueError(ERR["pwd_upper"])
+    if not any(c.islower() for c in pw):
+        raise ValueError(ERR["pwd_lower"])
+    if not any(c.isdigit() for c in pw):
+        raise ValueError(ERR["pwd_digit"])
+    if not _SYMBOLS_RE.search(pw):
+        raise ValueError(ERR["pwd_symbol"])
+
+
+class RegisterInitReq(BaseModel):
+    email: EmailStr
+    password: str
+    confirm_password: str
+    name: str
+    role: Literal["farmer", "buyer", "exporter"] = "buyer"
+    phone: str
+    location: Optional[str] = None
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not 2 <= len(v) <= 50:
+            raise ValueError(ERR["name_len"])
+        if not NAME_RE.match(v):
+            raise ValueError(ERR["name_chars"])
+        return v
+
+    @field_validator("phone")
+    @classmethod
+    def _phone(cls, v: str) -> str:
+        v = (v or "").strip().replace(" ", "").replace("-", "")
+        if v.startswith("+91"):
+            v = v[3:]
+        if v.startswith("91") and len(v) == 12:
+            v = v[2:]
+        if not MOBILE_INDIA_RE.match(v):
+            raise ValueError(ERR["mobile_format"])
+        return v
+
+    @field_validator("password")
+    @classmethod
+    def _pw(cls, v: str) -> str:
+        _validate_password(v)
+        return v
+
+    @field_validator("confirm_password")
+    @classmethod
+    def _confirm(cls, v: str, info) -> str:
+        if v != info.data.get("password"):
+            raise ValueError(ERR["pwd_mismatch"])
+        return v
+
+
+class RegisterVerifyReq(BaseModel):
+    otp_session: str
+    code: str
+
+    @field_validator("code")
+    @classmethod
+    def _code(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v.isdigit() or len(v) != 6:
+            raise ValueError(ERR["otp_invalid"])
+        return v
+
+
+class RegisterResendReq(BaseModel):
+    otp_session: str
 
 
 class RegisterReq(BaseModel):
@@ -437,13 +545,185 @@ async def csrf_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+def _otp_email_html(name: str, code: str) -> tuple[str, str]:
+    """Return (html, text) for the OTP email — bilingual EN/MR, mobile-friendly.
+    Uses inline CSS + a single table (email-client friendly)."""
+    safe_name = (name or "there").split(" ")[0][:24]
+    html = f"""\
+<!DOCTYPE html>
+<html><body style="margin:0;padding:0;background:#f5f7f4;font-family:Arial,sans-serif;color:#111">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f7f4;padding:24px 0">
+  <tr><td align="center">
+    <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:16px;overflow:hidden">
+      <tr><td style="background:#16a34a;padding:20px 24px;color:#fff">
+        <div style="font-size:22px;font-weight:800;letter-spacing:.3px">KisanBaazar</div>
+        <div style="font-size:12px;opacity:.85">Agriculture Marketplace · कृषी बाजार</div>
+      </td></tr>
+      <tr><td style="padding:28px 24px">
+        <p style="margin:0 0 12px;font-size:16px">Hi {safe_name},</p>
+        <p style="margin:0 0 20px;font-size:14px;color:#555">
+          Use this One-Time Password to complete your registration.<br/>
+          <span style="color:#16a34a">तुमची नोंदणी पूर्ण करण्यासाठी हा OTP वापरा.</span>
+        </p>
+        <div style="text-align:center;margin:24px 0">
+          <div style="display:inline-block;background:#f0fdf4;border:2px dashed #16a34a;color:#111;font-size:36px;letter-spacing:12px;font-weight:800;padding:16px 24px;border-radius:12px">
+            {code}
+          </div>
+        </div>
+        <p style="margin:0 0 8px;font-size:13px;color:#555">
+          This code expires in <b>10 minutes</b>. Do not share it with anyone — KisanBaazar staff will never ask for your OTP.<br/>
+          <span style="color:#777">हा कोड <b>10 मिनिटांत</b> संपेल. तो कोणालाही शेअर करू नका.</span>
+        </p>
+        <p style="margin:24px 0 0;font-size:12px;color:#999">If you didn't try to register on KisanBaazar, you can safely ignore this email.</p>
+      </td></tr>
+      <tr><td style="background:#0f172a;color:#94a3b8;padding:14px 24px;font-size:11px;text-align:center">
+        © KisanBaazar · Direct from farm. सरळ शेतकऱ्यांकडून.
+      </td></tr>
+    </table>
+  </td></tr>
+</table>
+</body></html>"""
+    text = (
+        f"KisanBaazar OTP\n\nHi {safe_name},\n\n"
+        f"Your one-time password is: {code}\n"
+        f"तुमचा वन-टाइम पासवर्ड: {code}\n\n"
+        f"This code expires in 10 minutes.\n"
+        f"Do not share it with anyone.\n"
+    )
+    return html, text
+
+
+async def _mobile_taken(phone: str) -> bool:
+    return await db.users.find_one({"phone": phone}, {"_id": 0, "user_id": 1}) is not None
+
+
 # ------------------ Auth Routes ------------------
+@api.post("/auth/register/init")
+async def register_init(req: RegisterInitReq):
+    """Step 1: validate the registration payload, check duplicates, generate
+    an OTP session and send the code via email. Returns `otp_session` +
+    delivery hint. No user is created at this point."""
+    email = req.email.lower()
+    if await db.users.find_one({"email": email}, {"_id": 0, "user_id": 1}):
+        raise HTTPException(409, ERR["email_taken"])
+    if await _mobile_taken(req.phone):
+        raise HTTPException(409, ERR["mobile_taken"])
+
+    # Snapshot the pending payload — password already hashed here so plaintext
+    # never leaves this call site.
+    payload = {
+        "email": email,
+        "password_hash": hash_pw(req.password),
+        "name": req.name,
+        "role": req.role,
+        "phone": req.phone,
+        "location": req.location,
+    }
+    session_id, code = await otp_service.create(
+        db, purpose="register", email=email, payload=payload,
+    )
+    html, text = _otp_email_html(req.name, code)
+    delivery = await send_email(
+        to=email, subject="Your KisanBaazar OTP · तुमचा OTP", html=html, text=text,
+    )
+    return {
+        "otp_session": session_id,
+        "email": email,
+        "expires_in_seconds": int(otp_service.OTP_TTL.total_seconds()),
+        "resend_cooldown_seconds": int(otp_service.RESEND_COOLDOWN.total_seconds()),
+        "mock_delivery": delivery.get("mock", False),
+    }
+
+
+@api.post("/auth/register/resend-otp")
+async def register_resend_otp(req: RegisterResendReq):
+    """Step 1.5: rotate + resend OTP for an existing pending session.
+    Enforces 60s cooldown at the service layer."""
+    try:
+        new_code, row = await otp_service.resend(db, session_id=req.otp_session)
+    except ValueError as e:
+        msg = str(e)
+        if msg == "session_not_found":
+            raise HTTPException(404, ERR["session_gone"])
+        if msg == "expired":
+            raise HTTPException(410, ERR["otp_expired"])
+        if msg.startswith("cooldown:"):
+            secs = msg.split(":", 1)[1]
+            raise HTTPException(429, ERR["otp_cooldown"].format(s=secs))
+        raise HTTPException(400, msg)
+    name = (row.get("email") or "").split("@")[0]
+    html, text = _otp_email_html(name, new_code)
+    delivery = await send_email(
+        to=row["email"], subject="Your KisanBaazar OTP · तुमचा OTP",
+        html=html, text=text,
+    )
+    return {
+        "otp_session": req.otp_session,
+        "email": row["email"],
+        "resend_count": row["resend_count"],
+        "mock_delivery": delivery.get("mock", False),
+    }
+
+
+@api.post("/auth/register/verify-otp")
+async def register_verify_otp(req: RegisterVerifyReq, response: Response):
+    """Step 2: verify the OTP and, on success, atomically create the user
+    account + sign them in (sets httpOnly JWT cookie + returns CSRF token)."""
+    try:
+        payload = await otp_service.verify(
+            db, session_id=req.otp_session, code=req.code,
+        )
+    except ValueError as e:
+        msg = str(e)
+        if msg == "session_not_found":
+            raise HTTPException(404, ERR["session_gone"])
+        if msg == "expired":
+            raise HTTPException(410, ERR["otp_expired"])
+        if msg == "too_many_attempts":
+            raise HTTPException(429, ERR["otp_max"])
+        if msg.startswith("invalid_code:"):
+            remaining = msg.split(":", 1)[1]
+            raise HTTPException(400, f'{ERR["otp_invalid"]} ({remaining} left)')
+        raise HTTPException(400, ERR["otp_invalid"])
+
+    email = payload["_email"]
+    # Race-check duplicates once more (someone could have registered in the
+    # ~10 minute window since /init).
+    if await db.users.find_one({"email": email}, {"_id": 0, "user_id": 1}):
+        raise HTTPException(409, ERR["email_taken"])
+    if payload.get("phone") and await _mobile_taken(payload["phone"]):
+        raise HTTPException(409, ERR["mobile_taken"])
+
+    user_id = f"user_{uuid.uuid4().hex[:12]}"
+    doc = {
+        "user_id": user_id,
+        "email": email,
+        "password": payload["password_hash"],
+        "name": payload["name"],
+        "role": payload["role"],
+        "phone": payload.get("phone"),
+        "location": payload.get("location"),
+        "picture": None,
+        "verified": True,  # email verified via OTP
+        "created_at": now_iso(),
+    }
+    await db.users.insert_one(doc)
+    token = make_jwt(user_id)
+    csrf = _set_auth_cookies(response, token)
+    return {"user": public_user(doc), "csrf_token": csrf}
+
+
 @api.post("/auth/register")
 async def register(req: RegisterReq, response: Response):
+    """Legacy direct-register (no OTP). Kept for backwards compatibility with
+    existing tests/tools. **New signups should use /auth/register/init +
+    /auth/register/verify-otp.**"""
     email = req.email.lower()
     existing = await db.users.find_one({"email": email}, {"_id": 0})
     if existing:
-        raise HTTPException(400, "Email already registered")
+        raise HTTPException(400, ERR["email_taken"])
+    if req.phone and await _mobile_taken(req.phone):
+        raise HTTPException(400, ERR["mobile_taken"])
     user_id = f"user_{uuid.uuid4().hex[:12]}"
     doc = {
         "user_id": user_id,
@@ -1534,5 +1814,6 @@ async def startup_indexes():
             logger.warning("users.email unique index skipped: %s", e)
         await ensure_payment_indexes(db)
         await ensure_review_indexes(db)
+        await otp_service.ensure_indexes(db)
     except Exception as e:
         logger.exception("Index creation failed: %s", e)
