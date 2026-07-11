@@ -34,5 +34,4 @@ razorpay==2.0.1
 # --- PDF invoice generation ---
 reportlab==5.0.0
 
-# --- Email (Resend for OTP + transactional email) ---
-resend==2.32.2
+# --- Email (Brevo for OTP + transactional email, sent via httpx above) ---
