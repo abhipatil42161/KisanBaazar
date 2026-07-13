@@ -104,23 +104,30 @@ MIN_PW_LEN = 6
 
 
 def _set_auth_cookies(response: Response, jwt_token: str, csrf_value: Optional[str] = None) -> str:
-    """Set httpOnly JWT cookie + readable CSRF cookie. Returns the CSRF value used."""
+    """Set httpOnly JWT cookie + readable CSRF cookie. Returns the CSRF value used.
+
+    samesite="none" (with secure=True) is required here because the frontend
+    (kisanbaazar.in) and backend (kisanbaazar.onrender.com) are different
+    sites — a "lax" cookie is never attached to cross-site XHR/fetch calls,
+    only to top-level navigations, which silently 401s every API call made
+    from frontend JS.
+    """
     csrf_value = csrf_value or secrets.token_urlsafe(32)
     response.set_cookie(
         AUTH_COOKIE, jwt_token,
-        httponly=True, secure=True, samesite="lax", path="/", max_age=COOKIE_MAX_AGE,
+        httponly=True, secure=True, samesite="none", path="/", max_age=COOKIE_MAX_AGE,
     )
     response.set_cookie(
         CSRF_COOKIE, csrf_value,
-        httponly=False, secure=True, samesite="lax", path="/", max_age=COOKIE_MAX_AGE,
+        httponly=False, secure=True, samesite="none", path="/", max_age=COOKIE_MAX_AGE,
     )
     return csrf_value
 
 
 def _clear_auth_cookies(response: Response) -> None:
-    response.delete_cookie(AUTH_COOKIE, path="/")
-    response.delete_cookie(CSRF_COOKIE, path="/")
-    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(AUTH_COOKIE, path="/", secure=True, samesite="none")
+    response.delete_cookie(CSRF_COOKIE, path="/", secure=True, samesite="none")
+    response.delete_cookie(SESSION_COOKIE, path="/", secure=True, samesite="none")
 
 
 # ------------------ Models ------------------
@@ -777,7 +784,7 @@ async def me(response: Response, user: User = Depends(get_current_user), csrf_to
         new_csrf = secrets.token_urlsafe(32)
         response.set_cookie(
             CSRF_COOKIE, new_csrf,
-            httponly=False, secure=True, samesite="lax", path="/", max_age=COOKIE_MAX_AGE,
+            httponly=False, secure=True, samesite="none", path="/", max_age=COOKIE_MAX_AGE,
         )
     return user
 
@@ -788,7 +795,7 @@ async def issue_csrf(response: Response):
     csrf = secrets.token_urlsafe(32)
     response.set_cookie(
         CSRF_COOKIE, csrf,
-        httponly=False, secure=True, samesite="lax", path="/", max_age=COOKIE_MAX_AGE,
+        httponly=False, secure=True, samesite="none", path="/", max_age=COOKIE_MAX_AGE,
     )
     return {"csrf_token": csrf}
 
