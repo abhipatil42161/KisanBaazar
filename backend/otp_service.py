@@ -130,21 +130,12 @@ async def resend(db, *, session_id: str) -> tuple[str, dict]:
 
 
 async def verify(db, *, session_id: str, code: str) -> dict:
-    """Verify a code. On success, atomically mark the record consumed and
-    return the payload so the caller can create the user. On failure raises
-    ValueError with a machine-readable reason.
-
-    If this session was ALREADY consumed by a prior (successful) call — e.g.
-    a double-tap on the verify button, or a client that timed out on a slow
-    Render cold-start response even though the request completed server-side
-    — we raise `already_consumed:<email>` instead of `session_not_found` so
-    the caller can log the user in rather than showing a false failure.
-    """
+    """Verify a code. On success, DELETE the record and return the payload
+    so the caller can create the user. On failure raises ValueError with a
+    machine-readable reason."""
     row = await db.otp_verifications.find_one({"otp_session": session_id}, {"_id": 0})
     if not row:
         raise ValueError("session_not_found")
-    if row.get("consumed"):
-        raise ValueError(f"already_consumed:{row['email']}")
     if _parse_iso(row["expires_at"]) < _now():
         await db.otp_verifications.delete_one({"otp_session": session_id})
         raise ValueError("expired")
@@ -161,20 +152,9 @@ async def verify(db, *, session_id: str, code: str) -> dict:
             raise ValueError("too_many_attempts")
         raise ValueError(f"invalid_code:{remaining}")
 
-    # Atomically claim this session so a concurrent/duplicate request can't
-    # also pass the checks above and create a second account for the same
-    # payload. Only the request that wins this update proceeds to create
-    # the user; a racing request will see consumed=True and raise
-    # already_consumed above (on its own read) or get no match here.
-    claimed = await db.otp_verifications.find_one_and_update(
-        {"otp_session": session_id, "consumed": {"$ne": True}},
-        {"$set": {"consumed": True}},
-    )
-    if not claimed:
-        raise ValueError(f"already_consumed:{row['email']}")
-
     payload = row.get("payload") or {}
     payload["_email"] = row["email"]
+    await db.otp_verifications.delete_one({"otp_session": session_id})
     return payload
 
 

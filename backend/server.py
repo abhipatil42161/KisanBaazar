@@ -136,12 +136,11 @@ class User(BaseModel):
     user_id: str
     email: str
     name: str
-    role: Literal["farmer", "buyer", "exporter", "admin"] = "buyer"
+    role: Literal["farmer", "buyer", "exporter", "admin", "delivery_partner"] = "buyer"
     phone: Optional[str] = None
     location: Optional[str] = None
     picture: Optional[str] = None
     verified: bool = False
-    banned: bool = False
     created_at: str
 
 
@@ -295,7 +294,6 @@ class Product(BaseModel):
     current_bid: Optional[float] = None
     rating_avg: Optional[float] = 0.0
     rating_count: Optional[int] = 0
-    active: bool = True
     created_at: str
 
 
@@ -356,6 +354,31 @@ class ChatReq(BaseModel):
     session_id: Optional[str] = None
 
 
+class DeliveryCreate(BaseModel):
+    method: Literal["pickup", "local_delivery", "courier", "transport", "seller_delivery"]
+    distance_km: Optional[float] = None
+    weight_kg: Optional[float] = None
+    vehicle_type: Optional[Literal["bike", "mini_truck", "truck"]] = None
+    courier_partner: Optional[str] = None
+    seller_charge: Optional[float] = None  # only used for method == seller_delivery
+
+
+class DeliveryStatusUpdate(BaseModel):
+    status: Literal["assigned", "picked_up", "out_for_delivery", "delivered", "failed"]
+    note: Optional[str] = None
+
+
+class DeliveryOtpVerify(BaseModel):
+    code: str
+
+
+class DeliveryPartnerCreate(BaseModel):
+    name: str
+    email: EmailStr
+    password: str
+    phone: Optional[str] = None
+
+
 class BidReq(BaseModel):
     amount: float
 
@@ -395,45 +418,6 @@ class ReviewReportReq(BaseModel):
     reason: Optional[str] = "inappropriate"
 
 
-class AdminUserUpdateReq(BaseModel):
-    role: Optional[Literal["farmer", "buyer", "exporter", "admin"]] = None
-    banned: Optional[bool] = None
-
-
-class AdminProductUpdateReq(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    title: Optional[str] = None
-    description: Optional[str] = None
-    category: Optional[str] = None
-    price: Optional[float] = None
-    available_qty: Optional[int] = None
-    quality_grade: Optional[Literal["A", "B", "C", "Export"]] = None
-    active: Optional[bool] = None
-
-
-class AdminOrderUpdateReq(BaseModel):
-    status: Literal["placed", "confirmed", "shipped", "delivered", "cancelled"]
-
-
-class AdminSettingsUpdateReq(BaseModel):
-    platform_fee_percent: Optional[float] = None
-    delivery_charge: Optional[float] = None
-
-
-class CategoryReq(BaseModel):
-    id: str
-    name: str
-    icon: str = "Leaf"
-
-
-class BannerReq(BaseModel):
-    title: str
-    image_url: str
-    link: Optional[str] = None
-    active: bool = True
-    sort_order: int = 0
-
-
 class ReviewModerateReq(BaseModel):
     action: Literal["publish", "hide", "delete"]
 
@@ -449,6 +433,54 @@ def hash_pw(pw: str) -> str:
 
 def verify_pw(pw: str, hashed: str) -> bool:
     return bcrypt.checkpw(pw.encode(), hashed.encode())
+
+
+def calculate_delivery_charge(
+    method: str, *, distance_km: float = 0.0, weight_kg: float = 1.0,
+    vehicle_type: str = "bike", seller_charge: Optional[float] = None,
+) -> float:
+    """Dynamic delivery pricing per method (spec: Delivery Charges System).
+
+    - pickup: always free.
+    - seller_delivery: seller sets their own flat charge.
+    - local_delivery: base fee + per-km + extra per-kg above a 5kg allowance.
+    - courier: flat courier-partner base + per-kg weight charge.
+    - transport: per-km * vehicle-type multiplier + per-kg.
+    """
+    distance_km = max(distance_km or 0.0, 0.0)
+    weight_kg = max(weight_kg or 0.0, 0.1)
+
+    if method == "pickup":
+        return 0.0
+    if method == "seller_delivery":
+        return round(max(float(seller_charge or 0), 0), 2)
+    if method == "local_delivery":
+        base = 15.0
+        return round(base + distance_km * 6.0 + max(weight_kg - 5, 0) * 3.0, 2)
+    if method == "courier":
+        base = 40.0
+        return round(base + weight_kg * 12.0, 2)
+    if method == "transport":
+        multiplier = {"bike": 1.0, "mini_truck": 2.5, "truck": 5.0}.get(vehicle_type, 2.5)
+        return round(distance_km * 4.0 * multiplier + weight_kg * 2.0, 2)
+    return 0.0
+
+
+async def _notify(user_id: str, title: str, message: str, ntype: str = "info") -> None:
+    """Best-effort in-app notification. Never raises — a notification-write
+    failure must not break the order/delivery flow that triggered it."""
+    try:
+        await db.notifications.insert_one({
+            "notification_id": f"notif_{uuid.uuid4().hex[:12]}",
+            "user_id": user_id,
+            "title": title,
+            "message": message,
+            "type": ntype,
+            "read": False,
+            "created_at": now_iso(),
+        })
+    except Exception:
+        logger.exception("Failed to create notification for user=%s", user_id)
 
 
 def make_jwt(user_id: str) -> str:
@@ -563,8 +595,6 @@ async def get_current_user(
     user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password": 0})
     if not user_doc:
         raise HTTPException(401, "User not found")
-    if user_doc.get("banned"):
-        raise HTTPException(403, "This account has been suspended | हे खाते निलंबित करण्यात आले आहे")
     return User(**user_doc)
 
 
@@ -645,22 +675,6 @@ def _otp_email_html(name: str, code: str) -> tuple[str, str]:
 
 async def _mobile_taken(phone: str) -> bool:
     return await db.users.find_one({"phone": phone}, {"_id": 0, "user_id": 1}) is not None
-
-
-# ------------------ Site settings (platform fee / delivery charge) ------------------
-SETTINGS_DOC_ID = "site_settings"
-DEFAULT_SETTINGS = {
-    "settings_id": SETTINGS_DOC_ID,
-    "platform_fee_percent": 1.0,   # matches the previous hardcoded *1.01 behaviour
-    "delivery_charge": 0.0,
-}
-
-
-async def get_settings() -> dict:
-    doc = await db.settings.find_one({"settings_id": SETTINGS_DOC_ID}, {"_id": 0})
-    if not doc:
-        return dict(DEFAULT_SETTINGS)
-    return {**DEFAULT_SETTINGS, **doc}
 
 
 # ------------------ Auth Routes ------------------
@@ -750,19 +764,6 @@ async def register_verify_otp(req: RegisterVerifyReq, response: Response):
         if msg.startswith("invalid_code:"):
             remaining = msg.split(":", 1)[1]
             raise HTTPException(400, f'{ERR["otp_invalid"]} ({remaining} left)')
-        if msg.startswith("already_consumed:"):
-            # This OTP session already succeeded once — e.g. a double-tap on
-            # "Verify & Create", or a client retry after a slow Render
-            # cold-start response that actually completed server-side. The
-            # account already exists; log the user in instead of showing a
-            # false "verification failed" error.
-            already_email = msg.split(":", 1)[1]
-            existing = await db.users.find_one({"email": already_email}, {"_id": 0})
-            if existing:
-                token = make_jwt(existing["user_id"])
-                csrf = _set_auth_cookies(response, token)
-                return {"user": public_user(existing), "csrf_token": csrf}
-            raise HTTPException(400, ERR["otp_invalid"])
         raise HTTPException(400, ERR["otp_invalid"])
 
     email = payload["_email"]
@@ -789,7 +790,7 @@ async def register_verify_otp(req: RegisterVerifyReq, response: Response):
     await db.users.insert_one(doc)
     token = make_jwt(user_id)
     csrf = _set_auth_cookies(response, token)
-    return {"user": public_user(doc), "csrf_token": csrf}
+    return {"user": public_user(doc), "csrf_token": csrf, "access_token": token}
 
 
 @api.post("/auth/register")
@@ -819,7 +820,7 @@ async def register(req: RegisterReq, response: Response):
     await db.users.insert_one(doc)
     token = make_jwt(user_id)
     csrf = _set_auth_cookies(response, token)
-    return {"user": public_user(doc), "csrf_token": csrf}
+    return {"user": public_user(doc), "csrf_token": csrf, "access_token": token}
 
 
 @api.post("/auth/login")
@@ -846,7 +847,7 @@ async def login(req: LoginReq, request: Request, response: Response):
     await clear_attempts(identifier)
     token = make_jwt(user["user_id"])
     csrf = _set_auth_cookies(response, token)
-    return {"user": public_user(user), "csrf_token": csrf}
+    return {"user": public_user(user), "csrf_token": csrf, "access_token": token}
 
 
 @api.get("/auth/me")
@@ -977,7 +978,7 @@ async def google_session(request: Request, response: Response):
         CSRF_COOKIE, csrf, httponly=False, secure=True, samesite="none", path="/",
         max_age=COOKIE_MAX_AGE,
     )
-    return {"user": public_user(user), "csrf_token": csrf}
+    return {"user": public_user(user), "csrf_token": csrf, "access_token": session_token}
 
 
 # ------------------ Products ------------------
@@ -1004,8 +1005,7 @@ CATEGORIES = [
 
 @api.get("/categories")
 async def categories():
-    docs = await db.categories.find({}, {"_id": 0}).sort("name", 1).to_list(200)
-    return docs if docs else CATEGORIES
+    return CATEGORIES
 
 
 @api.get("/products")
@@ -1018,7 +1018,7 @@ async def list_products(
     auction: Optional[bool] = None,
     limit: int = 60,
 ):
-    query = {"active": {"$ne": False}}
+    query = {}
     if category:
         query["category"] = category
     if q:
@@ -1059,7 +1059,6 @@ async def create_product(req: ProductCreate, user: User = Depends(get_current_us
         "farmer_name": user.name,
         **req.model_dump(),
         "current_bid": req.price if req.auction else None,
-        "active": True,
         "created_at": now_iso(),
     }
     await db.products.insert_one(doc)
@@ -1212,11 +1211,8 @@ async def bid(pid: str, req: BidReq, user: User = Depends(get_current_user)):
 @api.post("/orders")
 async def create_order(req: OrderCreate, user: User = Depends(get_current_user)):
     subtotal = sum(it.qty * it.price for it in req.items)
-    cfg = await get_settings()
-    fee_percent = cfg["platform_fee_percent"]
-    delivery_charge = cfg["delivery_charge"]
-    # Platform fee % + flat delivery charge — both admin-configurable.
-    charge_total = round(subtotal * (1 + fee_percent / 100) + delivery_charge)
+    # Front-end fee: 1% rounded — same calc as Checkout summary.
+    charge_total = round(subtotal * 1.01)
     oid = f"ord_{uuid.uuid4().hex[:10]}"
 
     rzp_id: Optional[str] = None
@@ -1245,8 +1241,6 @@ async def create_order(req: OrderCreate, user: User = Depends(get_current_user))
         "items": [it.model_dump() for it in req.items],
         "total": subtotal,
         "charge_total": charge_total,
-        "platform_fee_percent": fee_percent,
-        "delivery_charge": delivery_charge,
         "delivery_address": req.delivery_address,
         "payment_method": req.payment_method,
         "payment_status": "pending",
@@ -1260,12 +1254,214 @@ async def create_order(req: OrderCreate, user: User = Depends(get_current_user))
     return doc
 
 
-@api.get("/settings")
-async def public_settings():
-    """Public read-only site settings (platform fee %, delivery charge) so
-    Cart/Checkout can compute totals the same way the backend will charge."""
-    cfg = await get_settings()
-    return {"platform_fee_percent": cfg["platform_fee_percent"], "delivery_charge": cfg["delivery_charge"]}
+# ------------------ Delivery ------------------
+@api.post("/orders/{oid}/delivery")
+async def create_delivery(oid: str, req: DeliveryCreate, user: User = Depends(get_current_user)):
+    """Create the delivery record for an order. Callable by a farmer who owns
+    a product in the order, or an admin. One delivery record per order."""
+    order = await db.orders.find_one({"order_id": oid}, {"_id": 0})
+    if not order:
+        raise HTTPException(404, "Order not found")
+    if user.role == "farmer":
+        pids = [it["product_id"] for it in order["items"]]
+        owned = await db.products.count_documents({"product_id": {"$in": pids}, "farmer_id": user.user_id})
+        if owned == 0:
+            raise HTTPException(403, "Forbidden")
+    elif user.role != "admin":
+        raise HTTPException(403, "Farmer or admin only")
+
+    if await db.deliveries.find_one({"order_id": oid}):
+        raise HTTPException(409, "Delivery already created for this order")
+
+    weight_kg = req.weight_kg or sum(it["qty"] for it in order["items"])
+    charge = calculate_delivery_charge(
+        req.method, distance_km=req.distance_km or 0.0, weight_kg=weight_kg,
+        vehicle_type=req.vehicle_type or "bike", seller_charge=req.seller_charge,
+    )
+    did = f"del_{uuid.uuid4().hex[:12]}"
+    is_pickup = req.method == "pickup"
+    otp_code = f"{secrets.randbelow(1_000_000):06d}"
+    doc = {
+        "delivery_id": did,
+        "order_id": oid,
+        "buyer_id": order["buyer_id"],
+        "method": req.method,
+        "distance_km": req.distance_km,
+        "weight_kg": weight_kg,
+        "vehicle_type": req.vehicle_type,
+        "courier_partner": req.courier_partner,
+        "charge": charge,
+        "status": "delivered" if is_pickup else "assigned",
+        "assigned_partner_id": None,
+        "otp_code": otp_code,
+        "otp_verified": is_pickup,
+        "history": [{"status": "delivered" if is_pickup else "assigned", "at": now_iso(), "note": "Delivery created"}],
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    await db.deliveries.insert_one(doc)
+    await db.orders.update_one(
+        {"order_id": oid},
+        {"$set": {"status": "delivered" if is_pickup else "confirmed", "delivery_charge": charge}},
+    )
+    await _notify(
+        order["buyer_id"], "Delivery arranged",
+        f"Your order {oid} delivery has been arranged via {req.method.replace('_', ' ')}.",
+        "delivery",
+    )
+    doc.pop("_id", None)
+    if user.role != "admin":
+        doc.pop("otp_code", None)
+    return doc
+
+
+@api.get("/orders/{oid}/delivery")
+async def get_delivery(oid: str, user: User = Depends(get_current_user)):
+    d = await db.deliveries.find_one({"order_id": oid}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "No delivery record for this order")
+    if user.role == "admin" or user.user_id in (d["buyer_id"], d.get("assigned_partner_id")):
+        if user.role != "admin":
+            d.pop("otp_code", None)
+        return d
+    if user.role == "farmer":
+        order = await db.orders.find_one({"order_id": oid}, {"_id": 0})
+        pids = [it["product_id"] for it in (order or {}).get("items", [])]
+        if await db.products.count_documents({"product_id": {"$in": pids}, "farmer_id": user.user_id}):
+            d.pop("otp_code", None)
+            return d
+    raise HTTPException(403, "Forbidden")
+
+
+@api.get("/delivery/my")
+async def my_deliveries(user: User = Depends(get_current_user)):
+    """The logged-in delivery partner's assigned jobs (or all, for admin)."""
+    if user.role not in ("delivery_partner", "admin"):
+        raise HTTPException(403, "Delivery partner only")
+    q = {} if user.role == "admin" else {"assigned_partner_id": user.user_id}
+    docs = await db.deliveries.find(q, {"_id": 0, "otp_code": 0}).sort("created_at", -1).to_list(500)
+    return docs
+
+
+@api.patch("/delivery/{did}/assign")
+async def assign_delivery_partner(did: str, partner_id: str, user: User = Depends(get_current_user)):
+    if user.role != "admin":
+        raise HTTPException(403, "Admin only")
+    if not await db.users.find_one({"user_id": partner_id, "role": "delivery_partner"}):
+        raise HTTPException(404, "Delivery partner not found")
+    r = await db.deliveries.update_one(
+        {"delivery_id": did},
+        {"$set": {"assigned_partner_id": partner_id, "updated_at": now_iso()}},
+    )
+    if r.matched_count == 0:
+        raise HTTPException(404, "Delivery not found")
+    return {"ok": True}
+
+
+@api.patch("/delivery/{did}/status")
+async def update_delivery_status(did: str, req: DeliveryStatusUpdate, user: User = Depends(get_current_user)):
+    d = await db.deliveries.find_one({"delivery_id": did})
+    if not d:
+        raise HTTPException(404, "Delivery not found")
+    is_assigned_partner = user.role == "delivery_partner" and d.get("assigned_partner_id") == user.user_id
+    if user.role != "admin" and not is_assigned_partner:
+        raise HTTPException(403, "Forbidden")
+    if req.status == "delivered" and not d.get("otp_verified"):
+        raise HTTPException(400, "Delivery OTP must be verified before marking delivered")
+    entry = {"status": req.status, "at": now_iso(), "note": req.note}
+    await db.deliveries.update_one(
+        {"delivery_id": did},
+        {"$set": {"status": req.status, "updated_at": now_iso()}, "$push": {"history": entry}},
+    )
+    order_status = {"picked_up": "shipped", "out_for_delivery": "shipped", "delivered": "delivered"}.get(req.status)
+    if order_status:
+        await db.orders.update_one({"order_id": d["order_id"]}, {"$set": {"status": order_status}})
+    await _notify(
+        d["buyer_id"], "Delivery update",
+        f"Your order {d['order_id']} is now: {req.status.replace('_', ' ')}.",
+        "delivery",
+    )
+    return {"ok": True, "status": req.status}
+
+
+@api.post("/delivery/{did}/verify-otp")
+async def verify_delivery_otp(did: str, req: DeliveryOtpVerify, user: User = Depends(get_current_user)):
+    """Buyer or the assigned delivery partner confirms handover with the OTP
+    shown to the buyer — this is the proof-of-delivery step."""
+    d = await db.deliveries.find_one({"delivery_id": did})
+    if not d:
+        raise HTTPException(404, "Delivery not found")
+    allowed = user.role == "admin" or user.user_id in (d["buyer_id"], d.get("assigned_partner_id"))
+    if not allowed:
+        raise HTTPException(403, "Forbidden")
+    if d.get("otp_verified"):
+        return {"ok": True, "already_verified": True}
+    if req.code != d.get("otp_code"):
+        raise HTTPException(400, "Incorrect delivery code")
+    entry = {"status": "delivered", "at": now_iso(), "note": "OTP verified"}
+    await db.deliveries.update_one(
+        {"delivery_id": did},
+        {"$set": {"otp_verified": True, "status": "delivered", "updated_at": now_iso()}, "$push": {"history": entry}},
+    )
+    await db.orders.update_one({"order_id": d["order_id"]}, {"$set": {"status": "delivered"}})
+    await _notify(d["buyer_id"], "Order delivered", f"Your order {d['order_id']} has been delivered. Thank you!", "delivery")
+    return {"ok": True}
+
+
+@api.post("/delivery/charge-estimate")
+async def delivery_charge_estimate(req: DeliveryCreate):
+    """Public checkout-time estimate — no order/auth required yet, so the
+    buyer can see delivery cost before placing the order."""
+    weight_kg = req.weight_kg or 1.0
+    charge = calculate_delivery_charge(
+        req.method, distance_km=req.distance_km or 0.0, weight_kg=weight_kg,
+        vehicle_type=req.vehicle_type or "bike", seller_charge=req.seller_charge,
+    )
+    return {"method": req.method, "charge": charge}
+
+
+@api.get("/admin/deliveries")
+async def admin_list_deliveries(status: Optional[str] = None, user: User = Depends(get_current_user)):
+    if user.role != "admin":
+        raise HTTPException(403, "Admin only")
+    q: dict = {}
+    if status:
+        q["status"] = status
+    docs = await db.deliveries.find(q, {"_id": 0, "otp_code": 0}).sort("created_at", -1).to_list(1000)
+    return docs
+
+
+@api.post("/admin/delivery-partners")
+async def create_delivery_partner(req: DeliveryPartnerCreate, user: User = Depends(get_current_user)):
+    """Admin onboards a delivery partner account directly (no public
+    self-registration for this role, matching real-world onboarding)."""
+    if user.role != "admin":
+        raise HTTPException(403, "Admin only")
+    if await db.users.find_one({"email": req.email.lower()}):
+        raise HTTPException(409, "Email already registered")
+    partner_id = f"user_{uuid.uuid4().hex[:12]}"
+    doc = {
+        "user_id": partner_id,
+        "email": req.email.lower(),
+        "name": req.name,
+        "password": hash_pw(req.password),
+        "role": "delivery_partner",
+        "phone": req.phone,
+        "location": None,
+        "picture": None,
+        "verified": True,
+        "created_at": now_iso(),
+    }
+    await db.users.insert_one(doc)
+    return public_user(doc)
+
+
+@api.get("/admin/delivery-partners")
+async def list_delivery_partners(user: User = Depends(get_current_user)):
+    if user.role != "admin":
+        raise HTTPException(403, "Admin only")
+    docs = await db.users.find({"role": "delivery_partner"}, {"_id": 0, "password_hash": 0}).to_list(500)
+    return docs
 
 
 @api.get("/payments/config")
@@ -1749,6 +1945,12 @@ async def list_orders(user: User = Depends(get_current_user)):
         prods = await db.products.find({"farmer_id": user.user_id}, {"_id": 0, "product_id": 1}).to_list(500)
         pids = [p["product_id"] for p in prods]
         docs = await db.orders.find({"items.product_id": {"$in": pids}}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    elif user.role == "delivery_partner":
+        deliveries = await db.deliveries.find(
+            {"assigned_partner_id": user.user_id}, {"_id": 0, "order_id": 1},
+        ).to_list(500)
+        oids = [d["order_id"] for d in deliveries]
+        docs = await db.orders.find({"order_id": {"$in": oids}}, {"_id": 0}).sort("created_at", -1).to_list(500)
     else:
         docs = await db.orders.find({"buyer_id": user.user_id}, {"_id": 0}).sort("created_at", -1).to_list(500)
     return docs
@@ -1779,230 +1981,6 @@ async def stats(user: User = Depends(get_current_user)):
     orders = await db.orders.count_documents({"buyer_id": user.user_id})
     wishlist = await db.wishlist.count_documents({"user_id": user.user_id})
     return {"orders": orders, "wishlist": wishlist}
-
-
-# ------------------ Admin: Users ------------------
-@api.get("/admin/users")
-async def admin_list_users(
-    q: Optional[str] = None,
-    role: Optional[str] = None,
-    limit: int = 200,
-    user: User = Depends(get_current_user),
-):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
-    query: dict = {}
-    if role:
-        query["role"] = role
-    if q:
-        query["$or"] = [
-            {"name": {"$regex": q, "$options": "i"}},
-            {"email": {"$regex": q, "$options": "i"}},
-            {"phone": {"$regex": q, "$options": "i"}},
-        ]
-    docs = await db.users.find(query, {"_id": 0, "password": 0}).sort("created_at", -1).to_list(limit)
-    return docs
-
-
-@api.patch("/admin/users/{uid}")
-async def admin_update_user(uid: str, req: AdminUserUpdateReq, user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
-    if uid == user.user_id and (req.banned or req.role not in (None, "admin")):
-        raise HTTPException(400, "You cannot ban or demote your own account")
-    updates = {k: v for k, v in req.model_dump().items() if v is not None}
-    if not updates:
-        raise HTTPException(400, "Nothing to update")
-    result = await db.users.update_one({"user_id": uid}, {"$set": updates})
-    if result.matched_count == 0:
-        raise HTTPException(404, "User not found")
-    doc = await db.users.find_one({"user_id": uid}, {"_id": 0, "password": 0})
-    return doc
-
-
-@api.delete("/admin/users/{uid}")
-async def admin_delete_user(uid: str, user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
-    if uid == user.user_id:
-        raise HTTPException(400, "You cannot delete your own account")
-    result = await db.users.delete_one({"user_id": uid})
-    if result.deleted_count == 0:
-        raise HTTPException(404, "User not found")
-    return {"ok": True}
-
-
-# ------------------ Admin: Products ------------------
-@api.get("/admin/products")
-async def admin_list_products(
-    q: Optional[str] = None,
-    category: Optional[str] = None,
-    farmer_id: Optional[str] = None,
-    limit: int = 300,
-    user: User = Depends(get_current_user),
-):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
-    query: dict = {}
-    if category:
-        query["category"] = category
-    if farmer_id:
-        query["farmer_id"] = farmer_id
-    if q:
-        query["$or"] = [
-            {"title": {"$regex": q, "$options": "i"}},
-            {"farmer_name": {"$regex": q, "$options": "i"}},
-        ]
-    # Admin view includes inactive/deactivated listings (unlike the public /products list).
-    docs = await db.products.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
-    return docs
-
-
-@api.patch("/admin/products/{pid}")
-async def admin_update_product(pid: str, req: AdminProductUpdateReq, user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
-    updates = {k: v for k, v in req.model_dump().items() if v is not None}
-    if not updates:
-        raise HTTPException(400, "Nothing to update")
-    result = await db.products.update_one({"product_id": pid}, {"$set": updates})
-    if result.matched_count == 0:
-        raise HTTPException(404, "Product not found")
-    doc = await db.products.find_one({"product_id": pid}, {"_id": 0})
-    return doc
-
-
-@api.delete("/admin/products/{pid}")
-async def admin_delete_product(pid: str, user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
-    result = await db.products.delete_one({"product_id": pid})
-    if result.deleted_count == 0:
-        raise HTTPException(404, "Product not found")
-    return {"ok": True}
-
-
-# ------------------ Admin: Orders ------------------
-@api.patch("/admin/orders/{oid}")
-async def admin_update_order(oid: str, req: AdminOrderUpdateReq, user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
-    result = await db.orders.update_one({"order_id": oid}, {"$set": {"status": req.status}})
-    if result.matched_count == 0:
-        raise HTTPException(404, "Order not found")
-    doc = await db.orders.find_one({"order_id": oid}, {"_id": 0})
-    return doc
-
-
-# ------------------ Admin: Site Settings (platform fee / delivery charge) ------------------
-@api.get("/admin/settings")
-async def admin_get_settings(user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
-    return await get_settings()
-
-
-@api.put("/admin/settings")
-async def admin_update_settings(req: AdminSettingsUpdateReq, user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
-    updates = {k: v for k, v in req.model_dump().items() if v is not None}
-    if not updates:
-        raise HTTPException(400, "Nothing to update")
-    if "platform_fee_percent" in updates and not (0 <= updates["platform_fee_percent"] <= 100):
-        raise HTTPException(400, "Platform fee must be between 0 and 100 percent")
-    if "delivery_charge" in updates and updates["delivery_charge"] < 0:
-        raise HTTPException(400, "Delivery charge cannot be negative")
-    await db.settings.update_one({"settings_id": SETTINGS_DOC_ID}, {"$set": updates}, upsert=True)
-    return await get_settings()
-
-
-# ------------------ Admin: Categories ------------------
-@api.get("/admin/categories")
-async def admin_list_categories(user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
-    docs = await db.categories.find({}, {"_id": 0}).sort("name", 1).to_list(200)
-    return docs
-
-
-@api.post("/admin/categories")
-async def admin_create_category(req: CategoryReq, user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
-    if await db.categories.find_one({"id": req.id}):
-        raise HTTPException(409, "Category id already exists")
-    doc = req.model_dump()
-    await db.categories.insert_one(doc)
-    doc.pop("_id", None)
-    return doc
-
-
-@api.put("/admin/categories/{cid}")
-async def admin_update_category(cid: str, req: CategoryReq, user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
-    result = await db.categories.update_one({"id": cid}, {"$set": {"name": req.name, "icon": req.icon}})
-    if result.matched_count == 0:
-        raise HTTPException(404, "Category not found")
-    return await db.categories.find_one({"id": cid}, {"_id": 0})
-
-
-@api.delete("/admin/categories/{cid}")
-async def admin_delete_category(cid: str, user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
-    result = await db.categories.delete_one({"id": cid})
-    if result.deleted_count == 0:
-        raise HTTPException(404, "Category not found")
-    return {"ok": True}
-
-
-# ------------------ Admin: Banners ------------------
-@api.get("/banners")
-async def public_banners():
-    """Public — active banners only, in display order."""
-    docs = await db.banners.find({"active": True}, {"_id": 0}).sort("sort_order", 1).to_list(20)
-    return docs
-
-
-@api.get("/admin/banners")
-async def admin_list_banners(user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
-    docs = await db.banners.find({}, {"_id": 0}).sort("sort_order", 1).to_list(100)
-    return docs
-
-
-@api.post("/admin/banners")
-async def admin_create_banner(req: BannerReq, user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
-    bid = f"banner_{uuid.uuid4().hex[:10]}"
-    doc = {"banner_id": bid, **req.model_dump(), "created_at": now_iso()}
-    await db.banners.insert_one(doc)
-    doc.pop("_id", None)
-    return doc
-
-
-@api.put("/admin/banners/{bid}")
-async def admin_update_banner(bid: str, req: BannerReq, user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
-    result = await db.banners.update_one({"banner_id": bid}, {"$set": req.model_dump()})
-    if result.matched_count == 0:
-        raise HTTPException(404, "Banner not found")
-    return await db.banners.find_one({"banner_id": bid}, {"_id": 0})
-
-
-@api.delete("/admin/banners/{bid}")
-async def admin_delete_banner(bid: str, user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
-    result = await db.banners.delete_one({"banner_id": bid})
-    if result.deleted_count == 0:
-        raise HTTPException(404, "Banner not found")
-    return {"ok": True}
 
 
 # ------------------ Wishlist ------------------
@@ -2133,11 +2111,5 @@ async def startup_indexes():
         await ensure_payment_indexes(db)
         await ensure_review_indexes(db)
         await otp_service.ensure_indexes(db)
-        await db.categories.create_index("id", unique=True)
-        await db.banners.create_index("banner_id", unique=True)
-        # Seed categories from the built-in defaults on first run only, so
-        # admin edits/additions afterwards are never overwritten.
-        if await db.categories.count_documents({}) == 0:
-            await db.categories.insert_many([dict(c) for c in CATEGORIES])
     except Exception as e:
         logger.exception("Index creation failed: %s", e)
