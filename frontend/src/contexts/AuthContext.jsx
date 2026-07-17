@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { api } from "@/lib/api";
+import { api, setAccessToken, clearAccessToken } from "@/lib/api";
 import { logger } from "@/lib/logger";
 
 const AuthContext = createContext();
@@ -31,12 +31,14 @@ export const AuthProvider = ({ children }) => {
 
   const login = useCallback(async (email, password) => {
     const { data } = await api.post("/auth/login", { email, password });
+    if (data.access_token) setAccessToken(data.access_token);
     setUser(data.user);
     return data.user;
   }, []);
 
   const register = useCallback(async (payload) => {
     const { data } = await api.post("/auth/register", payload);
+    if (data.access_token) setAccessToken(data.access_token);
     setUser(data.user);
     return data.user;
   }, []);
@@ -48,6 +50,7 @@ export const AuthProvider = ({ children }) => {
       // Logout failures are non-fatal (e.g. network); still clear client state.
       logger.warn("[auth] Logout request failed; clearing local state anyway:", logoutErr);
     }
+    clearAccessToken();
     setUser(null);
   }, []);
 
