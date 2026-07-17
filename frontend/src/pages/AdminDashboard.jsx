@@ -1,26 +1,74 @@
 import { useCallback, useEffect, useState } from "react";
 import { getJson, api } from "@/lib/api";
-import { Users, Package, ShoppingBag, IndianRupee, Search, ShieldAlert } from "lucide-react";
+import { Users, Package, ShoppingBag, IndianRupee, Search, ShieldAlert, Truck, Plus } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { toast } from "sonner";
 import PaymentHistoryList, { fetchAdminPayments } from "@/components/PaymentHistoryList";
 import ReviewList from "@/components/ReviewList";
 
-const fetchAdminData = () =>
-  Promise.all([getJson("/dashboard/stats"), getJson("/orders"), fetchAdminPayments()])
-    .then(([stats, orders, payments]) => ({ stats, orders, payments }));
+const fetchAdminData = async () => {
+  const [statsR, ordersR, paymentsR] = await Promise.allSettled([
+    getJson("/dashboard/stats"),
+    getJson("/orders"),
+    fetchAdminPayments(),
+  ]);
+
+  const label = { statsR: "dashboard stats", ordersR: "orders", paymentsR: "payments" };
+  [["statsR", statsR], ["ordersR", ordersR], ["paymentsR", paymentsR]].forEach(([key, r]) => {
+    if (r.status === "rejected") {
+      // eslint-disable-next-line no-console
+      console.error(`[AdminDashboard] failed to load ${label[key]}:`, r.reason);
+      toast.error(`Couldn't load ${label[key]} — showing what's available`);
+    }
+  });
+
+  return {
+    stats: statsR.status === "fulfilled" ? statsR.value : {},
+    orders: ordersR.status === "fulfilled" ? ordersR.value : [],
+    payments: paymentsR.status === "fulfilled" ? paymentsR.value : [],
+  };
+};
 
 export default function AdminDashboard() {
   const [data, setData] = useState({ stats: {}, orders: [], payments: [] });
   const [tab, setTab] = useState("all"); // all | captured | failed | refunded
   const [q, setQ] = useState("");
   const [reviews, setReviews] = useState([]);
+  const [partners, setPartners] = useState([]);
+  const [partnerForm, setPartnerForm] = useState({ name: "", email: "", password: "", phone: "" });
+  const [creatingPartner, setCreatingPartner] = useState(false);
   const reload = useCallback(() => { fetchAdminData().then(setData); }, []);
   const loadReviews = useCallback(() => {
     api.get("/admin/reviews?status=reported")
       .then((r) => setReviews(r.data || []))
       .catch(() => setReviews([]));
   }, []);
-  useEffect(() => { reload(); loadReviews(); }, [reload, loadReviews]);
+  const loadPartners = useCallback(() => {
+    getJson("/admin/delivery-partners")
+      .then(setPartners)
+      .catch(() => setPartners([]));
+  }, []);
+  useEffect(() => { reload(); loadReviews(); loadPartners(); }, [reload, loadReviews, loadPartners]);
+
+  const createPartner = async (e) => {
+    e.preventDefault();
+    if (!partnerForm.name || !partnerForm.email || partnerForm.password.length < 8) {
+      toast.error("Name, email, and an 8+ character password are required");
+      return;
+    }
+    setCreatingPartner(true);
+    try {
+      await api.post("/admin/delivery-partners", partnerForm);
+      toast.success("Delivery partner account created");
+      setPartnerForm({ name: "", email: "", password: "", phone: "" });
+      loadPartners();
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Couldn't create delivery partner");
+    } finally {
+      setCreatingPartner(false);
+    }
+  };
 
   const { stats, orders, payments } = data;
   const needle = q.trim().toLowerCase();
@@ -109,6 +157,44 @@ export default function AdminDashboard() {
         <span className="text-xs text-muted-foreground font-normal">({reviews.length} reported)</span>
       </h2>
       <ReviewList reviews={reviews} role="admin" onChange={loadReviews} showProductTitle />
+
+      <h2 className="font-heading font-semibold text-xl mb-3 mt-10 flex items-center gap-2">
+        <Truck className="text-primary" size={20} />
+        Delivery Partners
+        <span className="text-xs text-muted-foreground font-normal">({partners.length})</span>
+      </h2>
+      <form onSubmit={createPartner} className="bg-card border-2 border-border rounded-2xl p-4 mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <Input placeholder="Full name" value={partnerForm.name}
+          onChange={(e) => setPartnerForm((f) => ({ ...f, name: e.target.value }))} />
+        <Input type="email" placeholder="Email" value={partnerForm.email}
+          onChange={(e) => setPartnerForm((f) => ({ ...f, email: e.target.value }))} />
+        <Input type="password" placeholder="Password (8+ chars)" value={partnerForm.password}
+          onChange={(e) => setPartnerForm((f) => ({ ...f, password: e.target.value }))} />
+        <Input placeholder="Phone (optional)" value={partnerForm.phone}
+          onChange={(e) => setPartnerForm((f) => ({ ...f, phone: e.target.value }))} />
+        <Button type="submit" disabled={creatingPartner}>
+          <Plus size={16} className="mr-1" /> Add partner
+        </Button>
+      </form>
+      <div className="bg-card border-2 border-border rounded-2xl overflow-hidden mb-10">
+        <table className="w-full text-sm">
+          <thead className="bg-muted/50">
+            <tr className="text-left">
+              <th className="p-3">Name</th><th className="p-3">Email</th><th className="p-3">Phone</th>
+            </tr>
+          </thead>
+          <tbody>
+            {partners.map((p) => (
+              <tr key={p.user_id} className="border-t border-border">
+                <td className="p-3">{p.name}</td>
+                <td className="p-3">{p.email}</td>
+                <td className="p-3">{p.phone || "—"}</td>
+              </tr>
+            ))}
+            {partners.length === 0 && <tr><td colSpan={3} className="p-6 text-center text-muted-foreground">No delivery partners yet</td></tr>}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

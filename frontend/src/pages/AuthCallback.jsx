@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api } from "@/lib/api";
+import { api, setAccessToken } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 
 // Module-scope: parses the OAuth hash and exchanges the session token, then
@@ -8,7 +8,10 @@ import { useAuth } from "@/contexts/AuthContext";
 const exchangeGoogleSession = (sessionId, refresh, nav) =>
   api
     .post("/auth/google/session", null, { headers: { "X-Session-ID": sessionId } })
-    .then(refresh)
+    .then(({ data }) => {
+      if (data.access_token) setAccessToken(data.access_token);
+      return refresh();
+    })
     .then(() => nav("/dashboard/buyer", { replace: true }));
 
 const parseSessionId = () => {
