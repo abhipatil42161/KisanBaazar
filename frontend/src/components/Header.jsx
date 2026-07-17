@@ -29,7 +29,8 @@ export default function Header() {
 
   const dashLink = user?.role === "farmer" ? "/dashboard/farmer"
     : user?.role === "admin" ? "/dashboard/admin"
-    : user?.role === "exporter" ? "/dashboard/exporter" : "/dashboard/buyer";
+    : user?.role === "exporter" ? "/dashboard/exporter"
+    : user?.role === "delivery_partner" ? "/dashboard/delivery" : "/dashboard/buyer";
 
   return (
     <header className="glass sticky top-0 z-40">
