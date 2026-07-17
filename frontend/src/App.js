@@ -21,6 +21,7 @@ import FarmerDashboard from "@/pages/FarmerDashboard";
 import BuyerDashboard from "@/pages/BuyerDashboard";
 import AdminDashboard from "@/pages/AdminDashboard";
 import ExporterDashboard from "@/pages/ExporterDashboard";
+import DeliveryDashboard from "@/pages/DeliveryDashboard";
 import AuthCallback from "@/pages/AuthCallback";
 import ProtectedRoute from "@/components/ProtectedRoute";
 
@@ -48,6 +49,7 @@ function AppRouter() {
           <Route path="/dashboard/buyer" element={<ProtectedRoute><BuyerDashboard /></ProtectedRoute>} />
           <Route path="/dashboard/exporter" element={<ProtectedRoute role="exporter"><ExporterDashboard /></ProtectedRoute>} />
           <Route path="/dashboard/admin" element={<ProtectedRoute role="admin"><AdminDashboard /></ProtectedRoute>} />
+          <Route path="/dashboard/delivery" element={<ProtectedRoute role="delivery_partner"><DeliveryDashboard /></ProtectedRoute>} />
         </Routes>
       </main>
       <Footer />
