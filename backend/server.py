@@ -105,8 +105,11 @@ CSRF_EXEMPT_PATHS = {
 # ------------------ Brute-force / Password reset constants ------------------
 LOCK_THRESHOLD = 5
 LOCK_DURATION = timedelta(minutes=15)
-RESET_TOKEN_TTL = timedelta(hours=1)
-MIN_PW_LEN = 6
+RESET_TOKEN_TTL = timedelta(minutes=15)
+MIN_PW_LEN = 8
+PASSWORD_HISTORY_LIMIT = 5
+RESET_REQUEST_LIMIT = 3
+RESET_REQUEST_WINDOW = timedelta(hours=1)
 
 
 def _set_auth_cookies(response: Response, jwt_token: str, csrf_value: Optional[str] = None) -> str:
@@ -154,6 +157,7 @@ class User(BaseModel):
     picture: Optional[str] = None
     verified: bool = False
     banned: bool = False
+    pw_version: int = 0
     created_at: str
 
 
@@ -279,6 +283,23 @@ class ForgotPasswordReq(BaseModel):
 
 class ResetPasswordReq(BaseModel):
     token: str
+    new_password: str
+
+
+class ChangePasswordReq(BaseModel):
+    current_password: str
+    new_password: str
+    confirm_new_password: str
+    logout_other_devices: bool = True
+
+
+class ForgotPasswordOtpReq(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordOtpVerifyReq(BaseModel):
+    otp_session: str
+    code: str
     new_password: str
 
 
@@ -473,8 +494,8 @@ def verify_pw(pw: str, hashed: str) -> bool:
     return bcrypt.checkpw(pw.encode(), hashed.encode())
 
 
-def make_jwt(user_id: str) -> str:
-    payload: dict = {"user_id": user_id, "exp": datetime.now(timezone.utc) + timedelta(days=7)}
+def make_jwt(user_id: str, pw_version: int = 0) -> str:
+    payload: dict = {"user_id": user_id, "pwv": pw_version, "exp": datetime.now(timezone.utc) + timedelta(days=7)}
     return pyjwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 
@@ -535,10 +556,58 @@ async def clear_attempts_for_email(email: str) -> None:
     await db.login_attempts.delete_many({"identifier": {"$regex": f":{email.lower()}$"}})
 
 
+def check_password_strength(pw: str) -> None:
+    """Same policy as registration (8+ chars, upper, lower, digit, symbol),
+    usable outside a pydantic validator context (change/reset-password)."""
+    try:
+        _validate_password(pw)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+async def log_security_event(event_type: str, *, user_id: Optional[str] = None, email: Optional[str] = None,
+                              ip: Optional[str] = None, detail: Optional[str] = None) -> None:
+    await db.security_logs.insert_one({
+        "log_id": f"seclog_{uuid.uuid4().hex[:12]}",
+        "event_type": event_type,  # password_changed | password_reset_requested | password_reset_completed
+                                    # | login_failed | account_locked | suspicious_login
+        "user_id": user_id,
+        "email": email,
+        "ip": ip,
+        "detail": detail,
+        "created_at": now_iso(),
+    })
+
+
+PASSWORD_CHANGED_EMAIL_HTML = """<p>Hi {name},</p>
+<p>Your KisanBaazar account password was just changed. If this was you, no action is needed.</p>
+<p>If you did <b>not</b> make this change, please reset your password immediately and contact support.</p>
+<p>— KisanBaazar Security</p>"""
+
+RESET_REQUESTED_EMAIL_HTML = """<p>Hi,</p>
+<p>We received a request to reset the password for this KisanBaazar account.</p>
+<p><a href="{link}">Click here to reset your password</a> — this link expires in 15 minutes.</p>
+<p>If you didn't request this, you can safely ignore this email — your password will not change.</p>
+<p>— KisanBaazar Security</p>"""
+
+RESET_COMPLETED_EMAIL_HTML = """<p>Hi {name},</p>
+<p>Your KisanBaazar password was successfully reset. You've been logged out of all other devices for security.</p>
+<p>If you did not do this, please contact support immediately.</p>
+<p>— KisanBaazar Security</p>"""
+
+
 def _user_id_from_jwt(token: str) -> Optional[str]:
     try:
         payload = pyjwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         return payload.get("user_id")
+    except Exception:
+        return None
+
+
+def _jwt_pwv(token: str) -> Optional[int]:
+    try:
+        payload = pyjwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return payload.get("pwv")
     except Exception:
         return None
 
@@ -564,9 +633,11 @@ async def get_current_user(
 ) -> User:
     """Resolve the current user. Priority: httpOnly JWT cookie → Google session cookie → Authorization Bearer (legacy)."""
     user_id: Optional[str] = None
+    token_pwv: Optional[int] = None
 
     if kb_token:
         user_id = _user_id_from_jwt(kb_token)
+        token_pwv = _jwt_pwv(kb_token)
 
     if not user_id and session_token:
         user_id = await _user_id_from_session(session_token)
@@ -587,6 +658,8 @@ async def get_current_user(
         raise HTTPException(401, "User not found")
     if user_doc.get("banned"):
         raise HTTPException(403, "This account has been suspended | हे खाते निलंबित करण्यात आले आहे")
+    if token_pwv is not None and token_pwv != user_doc.get("pw_version", 0):
+        raise HTTPException(401, "Session expired — password was changed. Please log in again.")
     return User(**user_doc)
 
 
@@ -874,7 +947,7 @@ async def register_verify_otp(req: RegisterVerifyReq, response: Response):
             already_email = msg.split(":", 1)[1]
             existing = await db.users.find_one({"email": already_email}, {"_id": 0})
             if existing:
-                token = make_jwt(existing["user_id"])
+                token = make_jwt(existing["user_id"], existing.get("pw_version", 0))
                 csrf = _set_auth_cookies(response, token)
                 return {"user": public_user(existing), "csrf_token": csrf}
             raise HTTPException(400, ERR["otp_invalid"])
@@ -947,8 +1020,19 @@ async def login(req: LoginReq, request: Request, response: Response):
     valid = bool(user and "password" in user and verify_pw(req.password, user["password"]))
     if not valid:
         attempts = await record_failed_login(identifier)
+        await log_security_event("login_failed", email=email, ip=get_client_ip(request),
+                                  detail=f"attempt {attempts}")
         remaining = max(0, LOCK_THRESHOLD - attempts)
         if remaining == 0:
+            await log_security_event("account_locked", user_id=user.get("user_id") if user else None,
+                                      email=email, ip=get_client_ip(request))
+            if user:
+                await send_email(
+                    to=email, subject="KisanBaazar — Multiple failed login attempts",
+                    html=f"<p>Hi {user.get('name', '')},</p><p>Your account had {attempts} failed login "
+                         f"attempts and has been temporarily locked for 15 minutes for your security. "
+                         f"If this wasn't you, consider resetting your password.</p><p>— KisanBaazar Security</p>",
+                )
             raise HTTPException(
                 status_code=429,
                 detail="Too many failed attempts. Account locked for 15 minutes.",
@@ -959,7 +1043,7 @@ async def login(req: LoginReq, request: Request, response: Response):
         raise HTTPException(401, "Invalid credentials")
 
     await clear_attempts(identifier)
-    token = make_jwt(user["user_id"])
+    token = make_jwt(user["user_id"], user.get("pw_version", 0))
     csrf = _set_auth_cookies(response, token)
     return {"user": public_user(user), "csrf_token": csrf}
 
@@ -998,11 +1082,27 @@ async def logout(response: Response, session_token: Optional[str] = Cookie(None)
 
 
 @api.post("/auth/forgot-password")
-async def forgot_password(req: ForgotPasswordReq):
-    """Issue a single-use reset token (1hr TTL). Always returns the same response to prevent email enumeration."""
+async def forgot_password(req: ForgotPasswordReq, request: Request):
+    """Issue a single-use reset token (15 min TTL). Always returns the same
+    response regardless of whether the account exists, to prevent email
+    enumeration. Rate-limited per email to slow down abuse."""
     email = req.email.lower()
+    ip = get_client_ip(request)
+
+    # Rate limit: max RESET_REQUEST_LIMIT requests per RESET_REQUEST_WINDOW per email.
+    window_start = datetime.now(timezone.utc) - RESET_REQUEST_WINDOW
+    recent = await db.password_reset_requests.count_documents({"email": email, "created_at": {"$gte": window_start}})
+    if recent >= RESET_REQUEST_LIMIT:
+        # Still return the generic response — don't reveal rate-limit state to a potential attacker.
+        return {"ok": True, "message": "If an account exists for that email, a reset link has been sent."}
+    await db.password_reset_requests.insert_one({"email": email, "ip": ip, "created_at": datetime.now(timezone.utc)})
+
     user = await db.users.find_one({"email": email}, {"_id": 0})
     if user:
+        # Invalidate any previously issued, still-unused tokens — only one active token at a time.
+        await db.password_reset_tokens.update_many(
+            {"user_id": user["user_id"], "used": False}, {"$set": {"used": True, "used_at": now_iso()}},
+        )
         token = secrets.token_urlsafe(32)
         expires_at = datetime.now(timezone.utc) + RESET_TOKEN_TTL
         await db.password_reset_tokens.insert_one({
@@ -1014,32 +1114,147 @@ async def forgot_password(req: ForgotPasswordReq):
             "created_at": now_iso(),
         })
         reset_link = f"{FRONTEND_URL.rstrip('/')}/reset-password?token={token}"
-        # In production, email this link. For dev we log it so testing can pull from backend logs.
-        logger.info("PASSWORD_RESET_LINK email=%s link=%s", email, reset_link)
+        await send_email(
+            to=email, subject="Reset your KisanBaazar password",
+            html=RESET_REQUESTED_EMAIL_HTML.format(link=reset_link),
+            text=f"Reset your password: {reset_link} (expires in 15 minutes)",
+        )
+        await log_security_event("password_reset_requested", user_id=user["user_id"], email=email, ip=ip)
     return {"ok": True, "message": "If an account exists for that email, a reset link has been sent."}
 
 
 @api.post("/auth/reset-password")
-async def reset_password(req: ResetPasswordReq):
-    if len(req.new_password) < MIN_PW_LEN:
-        raise HTTPException(400, f"Password must be at least {MIN_PW_LEN} characters")
+async def reset_password(req: ResetPasswordReq, request: Request):
+    check_password_strength(req.new_password)
     rec = await db.password_reset_tokens.find_one({"token": req.token})
     if not rec or rec.get("used"):
         raise HTTPException(400, "Invalid or expired reset token")
     expires_at = await _ensure_aware(rec["expires_at"])
     if expires_at < datetime.now(timezone.utc):
         raise HTTPException(400, "Invalid or expired reset token")
+
+    user = await db.users.find_one({"user_id": rec["user_id"]}, {"_id": 0})
+    if not user:
+        raise HTTPException(400, "Invalid or expired reset token")
+    _reject_if_password_reused(req.new_password, user)
+
     await db.users.update_one(
         {"user_id": rec["user_id"]},
-        {"$set": {"password": hash_pw(req.new_password)}},
+        {
+            "$set": {"password": hash_pw(req.new_password)},
+            "$inc": {"pw_version": 1},  # invalidates every previously issued JWT — logs out all devices
+            "$push": {"password_history": {"$each": [user.get("password", "")], "$slice": -PASSWORD_HISTORY_LIMIT}},
+        },
     )
-    await db.password_reset_tokens.update_one(
-        {"token": req.token},
-        {"$set": {"used": True, "used_at": now_iso()}},
+    # Single-use: mark this token used, and invalidate any other outstanding tokens for this user too.
+    await db.password_reset_tokens.update_many(
+        {"user_id": rec["user_id"], "used": False}, {"$set": {"used": True, "used_at": now_iso()}},
     )
-    # Clear any active lockouts so the user can log in immediately after reset
     await clear_attempts_for_email(rec["email"])
+    await send_email(
+        to=rec["email"], subject="Your KisanBaazar password was reset",
+        html=RESET_COMPLETED_EMAIL_HTML.format(name=user.get("name", "")),
+    )
+    await log_security_event("password_reset_completed", user_id=rec["user_id"], email=rec["email"], ip=get_client_ip(request))
     return {"ok": True, "message": "Password updated. You can now log in."}
+
+
+@api.post("/auth/forgot-password/otp")
+async def forgot_password_otp(req: ForgotPasswordOtpReq, request: Request):
+    """Email-OTP alternative to the reset-link flow — same rate limiting and
+    generic response to avoid revealing whether the account exists."""
+    email = req.email.lower()
+    window_start = datetime.now(timezone.utc) - RESET_REQUEST_WINDOW
+    recent = await db.password_reset_requests.count_documents({"email": email, "created_at": {"$gte": window_start}})
+    if recent < RESET_REQUEST_LIMIT:
+        await db.password_reset_requests.insert_one({"email": email, "ip": get_client_ip(request), "created_at": datetime.now(timezone.utc)})
+        user = await db.users.find_one({"email": email}, {"_id": 0, "user_id": 1})
+        if user:
+            session_id, code = await otp_service.create(db, purpose="reset-password", email=email, payload={"user_id": user["user_id"]})
+            await send_email(
+                to=email, subject="Your KisanBaazar password reset code",
+                html=f"<p>Your password reset code is:</p><h2 style='letter-spacing:4px'>{code}</h2><p>This code expires in 10 minutes.</p>",
+                text=f"Your password reset code: {code} (expires in 10 minutes)",
+            )
+            await log_security_event("password_reset_requested", user_id=user["user_id"], email=email, ip=get_client_ip(request))
+            return {"ok": True, "otp_session": session_id, "message": "If an account exists for that email, a code has been sent."}
+    return {"ok": True, "otp_session": None, "message": "If an account exists for that email, a code has been sent."}
+
+
+@api.post("/auth/reset-password/otp/verify")
+async def reset_password_otp_verify(req: ResetPasswordOtpVerifyReq, request: Request):
+    check_password_strength(req.new_password)
+    try:
+        payload = await otp_service.verify(db, session_id=req.otp_session, code=req.code)
+    except ValueError as e:
+        msg = str(e)
+        if msg == "session_not_found":
+            raise HTTPException(404, ERR["session_gone"])
+        if msg == "expired":
+            raise HTTPException(410, ERR["otp_expired"])
+        if msg == "too_many_attempts":
+            raise HTTPException(429, ERR["otp_max"])
+        raise HTTPException(400, ERR["otp_invalid"])
+
+    user_id = payload.get("user_id")
+    user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    if not user:
+        raise HTTPException(400, "Account not found")
+    _reject_if_password_reused(req.new_password, user)
+
+    await db.users.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {"password": hash_pw(req.new_password)},
+            "$inc": {"pw_version": 1},
+            "$push": {"password_history": {"$each": [user.get("password", "")], "$slice": -PASSWORD_HISTORY_LIMIT}},
+        },
+    )
+    await clear_attempts_for_email(user["email"])
+    await send_email(
+        to=user["email"], subject="Your KisanBaazar password was reset",
+        html=RESET_COMPLETED_EMAIL_HTML.format(name=user.get("name", "")),
+    )
+    await log_security_event("password_reset_completed", user_id=user_id, email=user["email"], ip=get_client_ip(request))
+    return {"ok": True, "message": "Password updated. You can now log in."}
+
+
+def _reject_if_password_reused(new_password: str, user: dict) -> None:
+    history = user.get("password_history", []) + ([user["password"]] if user.get("password") else [])
+    for old_hash in history:
+        if old_hash and verify_pw(new_password, old_hash):
+            raise HTTPException(400, "You've used this password before — please choose a different one")
+
+
+@api.post("/auth/change-password")
+async def change_password(req: ChangePasswordReq, request: Request, response: Response, user: User = Depends(get_current_user)):
+    if req.new_password != req.confirm_new_password:
+        raise HTTPException(400, ERR["pwd_mismatch"])
+    check_password_strength(req.new_password)
+    doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    if not doc or "password" not in doc or not verify_pw(req.current_password, doc["password"]):
+        raise HTTPException(400, "Current password is incorrect")
+    _reject_if_password_reused(req.new_password, doc)
+
+    new_pwv = doc.get("pw_version", 0) + (1 if req.logout_other_devices else 0)
+    await db.users.update_one(
+        {"user_id": user.user_id},
+        {
+            "$set": {"password": hash_pw(req.new_password), "pw_version": new_pwv},
+            "$push": {"password_history": {"$each": [doc["password"]], "$slice": -PASSWORD_HISTORY_LIMIT}},
+        },
+    )
+    await send_email(
+        to=doc["email"], subject="Your KisanBaazar password was changed",
+        html=PASSWORD_CHANGED_EMAIL_HTML.format(name=doc.get("name", "")),
+    )
+    await log_security_event("password_changed", user_id=user.user_id, email=doc["email"], ip=get_client_ip(request))
+
+    if req.logout_other_devices:
+        # Re-issue a fresh cookie for *this* session so the user isn't logged out of the tab they're using.
+        token = make_jwt(user.user_id, new_pwv)
+        _set_auth_cookies(response, token)
+    return {"ok": True, "message": "Password changed successfully."}
 
 
 @api.post("/auth/google/session")
@@ -2181,6 +2396,41 @@ async def admin_update_settings(req: AdminSettingsUpdateReq, user: User = Depend
     return await get_settings()
 
 
+# ------------------ Admin: Security ------------------
+@api.get("/admin/security-logs")
+async def admin_security_logs(
+    event_type: Optional[str] = None, email: Optional[str] = None, limit: int = 200,
+    user: User = Depends(get_current_user),
+):
+    if user.role != "admin":
+        raise HTTPException(403, "Admin only")
+    query: dict = {}
+    if event_type:
+        query["event_type"] = event_type
+    if email:
+        query["email"] = email
+    return await db.security_logs.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
+
+
+@api.get("/admin/locked-accounts")
+async def admin_locked_accounts(user: User = Depends(get_current_user)):
+    if user.role != "admin":
+        raise HTTPException(403, "Admin only")
+    now = datetime.now(timezone.utc)
+    docs = await db.login_attempts.find({"locked_until": {"$gt": now}}, {"_id": 0}).to_list(200)
+    return docs
+
+
+@api.post("/admin/unlock-account")
+async def admin_unlock_account(identifier: str, user: User = Depends(get_current_user)):
+    if user.role != "admin":
+        raise HTTPException(403, "Admin only")
+    result = await db.login_attempts.delete_one({"identifier": identifier})
+    if result.deleted_count == 0:
+        raise HTTPException(404, "No lockout found for that identifier")
+    return {"ok": True}
+
+
 # ------------------ Admin: Categories ------------------
 @api.get("/admin/categories")
 async def admin_list_categories(user: User = Depends(get_current_user)):
@@ -2402,6 +2652,10 @@ async def startup_indexes():
         await db.deliveries.create_index("delivery_id", unique=True)
         await db.deliveries.create_index("order_id")
         await db.deliveries.create_index("assigned_to")
+        await db.security_logs.create_index("created_at")
+        await db.security_logs.create_index("event_type")
+        await db.password_reset_requests.create_index("email")
+        await db.password_reset_requests.create_index("created_at", expireAfterSeconds=int(RESET_REQUEST_WINDOW.total_seconds()) * 2)
         # Seed categories from the built-in defaults on first run only, so
         # admin edits/additions afterwards are never overwritten.
         if await db.categories.count_documents({}) == 0:
