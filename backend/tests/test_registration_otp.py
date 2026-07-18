@@ -151,7 +151,7 @@ class TestOtpFlow:
         assert body["otp_session"].startswith("otp_")
         assert body["expires_in_seconds"] == 600
         assert body["resend_cooldown_seconds"] == 60
-        # In this env BREVO_API_KEY is empty -> mock delivery.
+        # In this env RESEND_API_KEY is empty -> mock delivery.
         assert body["mock_delivery"] is True
 
     def test_verify_wrong_code_decrements_attempts(self):
