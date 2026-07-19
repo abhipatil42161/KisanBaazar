@@ -1,7 +1,8 @@
 import "@/App.css";
+import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, useLocation } from "react-router-dom";
 import { Toaster } from "sonner";
-import { AuthProvider } from "@/contexts/AuthContext";
+import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { CartProvider } from "@/contexts/CartContext";
 import { ThemeProvider } from "@/contexts/ThemeContext";
 import { LanguageProvider } from "@/contexts/LanguageContext";
@@ -22,15 +23,38 @@ import BuyerDashboard from "@/pages/BuyerDashboard";
 import AdminDashboard from "@/pages/AdminDashboard";
 import ExporterDashboard from "@/pages/ExporterDashboard";
 import DeliveryDashboard from "@/pages/DeliveryDashboard";
+import ChangePassword from "@/pages/ChangePassword";
 import AuthCallback from "@/pages/AuthCallback";
 import ProtectedRoute from "@/components/ProtectedRoute";
+import { getJson } from "@/lib/api";
 
 function AppRouter() {
   const location = useLocation();
+  const { user, loading: authLoading } = useAuth();
+  const [maintenance, setMaintenance] = useState(null);
+
+  useEffect(() => {
+    getJson("/maintenance-status").then(setMaintenance).catch(() => setMaintenance({ enabled: false }));
+  }, []);
+
   // Handle Emergent Google OAuth session_id in URL fragment
   if (location.hash?.includes("session_id=")) {
     return <AuthCallback />;
   }
+
+  const isAdmin = user?.role === "admin" || user?.role === "super_admin";
+  if (maintenance?.enabled && !authLoading && !isAdmin) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-6 text-center bg-background text-foreground">
+        <div className="max-w-md">
+          <div className="text-5xl mb-4">🌾</div>
+          <h1 className="font-heading font-bold text-2xl mb-2">We'll be right back</h1>
+          <p className="text-muted-foreground">{maintenance.message}</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen flex flex-col bg-background text-foreground">
       <Header />
@@ -41,6 +65,7 @@ function AppRouter() {
           <Route path="/products/:id" element={<ProductDetail />} />
           <Route path="/cart" element={<Cart />} />
           <Route path="/checkout" element={<ProtectedRoute><Checkout /></ProtectedRoute>} />
+          <Route path="/account/password" element={<ProtectedRoute><ChangePassword /></ProtectedRoute>} />
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
