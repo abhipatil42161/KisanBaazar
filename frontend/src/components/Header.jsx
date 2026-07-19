@@ -10,7 +10,8 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
   DropdownMenuSeparator, DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
-import { ShoppingCart, Sun, Moon, Globe, User as UserIcon, Search, Sprout, LogOut, LayoutDashboard } from "lucide-react";
+import { ShoppingCart, Sun, Moon, Globe, User as UserIcon, Search, Sprout, LogOut, LayoutDashboard, KeyRound } from "lucide-react";
+import { useSiteContent } from "@/hooks/useSiteContent";
 import { useState } from "react";
 import NotificationBell from "@/components/NotificationBell";
 
@@ -19,6 +20,7 @@ export default function Header() {
   const { count } = useCart();
   const { theme, toggle } = useTheme();
   const { lang, setLanguage, t } = useLanguage();
+  const site = useSiteContent();
   const nav = useNavigate();
   const [search, setSearch] = useState("");
 
@@ -28,7 +30,7 @@ export default function Header() {
   };
 
   const dashLink = user?.role === "farmer" ? "/dashboard/farmer"
-    : user?.role === "admin" ? "/dashboard/admin"
+    : (user?.role === "admin" || user?.role === "super_admin") ? "/dashboard/admin"
     : user?.role === "exporter" ? "/dashboard/exporter"
     : user?.role === "delivery_partner" ? "/dashboard/delivery" : "/dashboard/buyer";
 
@@ -36,11 +38,15 @@ export default function Header() {
     <header className="glass sticky top-0 z-40">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 sm:h-20 flex items-center gap-3 sm:gap-6">
         <Link to="/" data-testid="logo-link" className="flex items-center gap-2 shrink-0">
-          <div className="w-10 h-10 rounded-2xl bg-primary flex items-center justify-center shadow-md">
-            <Sprout className="text-white" size={22} strokeWidth={2.5} />
-          </div>
+          {site.logo_url ? (
+            <img src={site.logo_url} alt={site.site_name} className="w-10 h-10 rounded-2xl object-cover shadow-md" />
+          ) : (
+            <div className="w-10 h-10 rounded-2xl bg-primary flex items-center justify-center shadow-md">
+              <Sprout className="text-white" size={22} strokeWidth={2.5} />
+            </div>
+          )}
           <span className="font-heading font-bold text-xl tracking-tight hidden sm:block">
-            Kisan<span className="text-primary">Baazar</span>
+            {site.site_name === "KisanBaazar" ? (<>Kisan<span className="text-primary">Baazar</span></>) : site.site_name}
           </span>
         </Link>
 
@@ -115,6 +121,9 @@ export default function Header() {
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={() => nav(dashLink)} data-testid="menu-dashboard">
                   <LayoutDashboard size={16} className="mr-2" /> {t("dashboard")}
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => nav("/account/password")} data-testid="menu-change-password">
+                  <KeyRound size={16} className="mr-2" /> Change Password
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={async () => { await logout(); nav("/"); }} data-testid="menu-logout">
                   <LogOut size={16} className="mr-2" /> {t("logout")}
