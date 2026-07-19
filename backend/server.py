@@ -146,12 +146,22 @@ DeliveryMethod = Literal["pickup", "local_delivery", "courier", "transport", "se
 VehicleType = Literal["mini_truck", "tempo", "truck"]
 
 
+def is_admin_role(role: str) -> bool:
+    """super_admin inherits every regular-admin permission."""
+    return role in ("admin", "super_admin")
+
+
+def require_super_admin(user) -> None:
+    if user.role != "super_admin":
+        raise HTTPException(403, "Super Admin only")
+
+
 class User(BaseModel):
     model_config = ConfigDict(extra="ignore")
     user_id: str
     email: str
     name: str
-    role: Literal["farmer", "buyer", "exporter", "admin", "delivery_partner"] = "buyer"
+    role: Literal["farmer", "buyer", "exporter", "admin", "delivery_partner", "super_admin"] = "buyer"
     phone: Optional[str] = None
     location: Optional[str] = None
     picture: Optional[str] = None
@@ -439,7 +449,7 @@ class ReviewReportReq(BaseModel):
 
 
 class AdminUserUpdateReq(BaseModel):
-    role: Optional[Literal["farmer", "buyer", "exporter", "admin", "delivery_partner"]] = None
+    role: Optional[Literal["farmer", "buyer", "exporter", "admin", "delivery_partner", "super_admin"]] = None
     banned: Optional[bool] = None
 
 
@@ -579,6 +589,22 @@ async def log_security_event(event_type: str, *, user_id: Optional[str] = None, 
     })
 
 
+async def log_admin_activity(admin, action: str, *, target_type: Optional[str] = None,
+                              target_id: Optional[str] = None, detail: Optional[str] = None) -> None:
+    """Every Super Admin / Admin mutation gets recorded here for accountability."""
+    await db.admin_activity_logs.insert_one({
+        "log_id": f"actlog_{uuid.uuid4().hex[:12]}",
+        "admin_id": admin.user_id,
+        "admin_name": admin.name,
+        "admin_role": admin.role,
+        "action": action,
+        "target_type": target_type,
+        "target_id": target_id,
+        "detail": detail,
+        "created_at": now_iso(),
+    })
+
+
 PASSWORD_CHANGED_EMAIL_HTML = """<p>Hi {name},</p>
 <p>Your KisanBaazar account password was just changed. If this was you, no action is needed.</p>
 <p>If you did <b>not</b> make this change, please reset your password immediately and contact support.</p>
@@ -690,6 +716,31 @@ async def csrf_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+# ------------------ Maintenance mode middleware ------------------
+MAINTENANCE_EXEMPT_PREFIXES = ("/api/auth", "/api/admin", "/api/maintenance-status", "/api/site-content", "/api/settings")
+
+
+@app.middleware("http")
+async def maintenance_mode_middleware(request: Request, call_next):
+    """While maintenance mode is on, block write operations from anyone who
+    isn't an admin/super_admin. Reads (GET) and auth/admin endpoints always
+    pass through so admins can still sign in and manage the site."""
+    if request.method != "GET":
+        path = request.url.path
+        if not any(path.startswith(p) for p in MAINTENANCE_EXEMPT_PREFIXES):
+            m = await get_maintenance()
+            if m["enabled"]:
+                token = request.cookies.get(AUTH_COOKIE)
+                user_id = _user_id_from_jwt(token) if token else None
+                allowed = False
+                if user_id:
+                    u = await db.users.find_one({"user_id": user_id}, {"_id": 0, "role": 1})
+                    allowed = bool(u and is_admin_role(u.get("role", "")))
+                if not allowed:
+                    return JSONResponse(status_code=503, content={"detail": m["message"]})
+    return await call_next(request)
+
+
 def _otp_email_html(name: str, code: str) -> tuple[str, str]:
     """Return (html, text) for the OTP email — bilingual EN/MR, mobile-friendly.
     Uses inline CSS + a single table (email-client friendly)."""
@@ -756,6 +807,66 @@ async def get_settings() -> dict:
     if not doc:
         return dict(DEFAULT_SETTINGS)
     return {**DEFAULT_SETTINGS, **doc}
+
+
+# ------------------ Website Content (Super Admin CMS) ------------------
+SITE_CONTENT_DOC_ID = "site_content"
+DEFAULT_SITE_CONTENT = {
+    "content_id": SITE_CONTENT_DOC_ID,
+    "site_name": "KisanBaazar",
+    "site_description": "Connecting India's farmers directly to the world. Transparent. Trusted. Trade.",
+    "logo_url": None,
+    "contact_email": "hello@kisanbaazar.in",
+    "contact_phone": "1800-KISAN-00",
+    "contact_address": "Pune, Maharashtra",
+    "footer_text": "Made with 🌾 for Indian farmers",
+    "social_links": {"facebook": "", "instagram": "", "twitter": "", "youtube": "", "whatsapp": ""},
+}
+
+
+async def get_site_content() -> dict:
+    doc = await db.site_content.find_one({"content_id": SITE_CONTENT_DOC_ID}, {"_id": 0})
+    if not doc:
+        return dict(DEFAULT_SITE_CONTENT)
+    merged = {**DEFAULT_SITE_CONTENT, **doc}
+    merged["social_links"] = {**DEFAULT_SITE_CONTENT["social_links"], **doc.get("social_links", {})}
+    return merged
+
+
+class SocialLinks(BaseModel):
+    facebook: str = ""
+    instagram: str = ""
+    twitter: str = ""
+    youtube: str = ""
+    whatsapp: str = ""
+
+
+class SiteContentUpdateReq(BaseModel):
+    site_name: Optional[str] = None
+    site_description: Optional[str] = None
+    logo_url: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+    contact_address: Optional[str] = None
+    footer_text: Optional[str] = None
+    social_links: Optional[SocialLinks] = None
+
+
+# ------------------ Maintenance Mode ------------------
+MAINTENANCE_DOC_ID = "maintenance"
+DEFAULT_MAINTENANCE = {"maintenance_id": MAINTENANCE_DOC_ID, "enabled": False, "message": "We'll be back shortly — KisanBaazar is undergoing scheduled maintenance."}
+
+
+async def get_maintenance() -> dict:
+    doc = await db.maintenance.find_one({"maintenance_id": MAINTENANCE_DOC_ID}, {"_id": 0})
+    if not doc:
+        return dict(DEFAULT_MAINTENANCE)
+    return {**DEFAULT_MAINTENANCE, **doc}
+
+
+class MaintenanceUpdateReq(BaseModel):
+    enabled: bool
+    message: Optional[str] = None
 
 
 # ------------------ Hybrid Delivery System ------------------
@@ -1404,7 +1515,7 @@ async def delete_product(pid: str, user: User = Depends(get_current_user)):
     prod = await db.products.find_one({"product_id": pid}, {"_id": 0})
     if not prod:
         raise HTTPException(404, "Not found")
-    if prod["farmer_id"] != user.user_id and user.role != "admin":
+    if prod["farmer_id"] != user.user_id and not is_admin_role(user.role):
         raise HTTPException(403, "Forbidden")
     # Cascade-delete Cloudinary assets (best-effort; failures logged)
     public_ids = [
@@ -1440,7 +1551,7 @@ async def update_product(pid: str, req: ProductUpdate, user: User = Depends(get_
     prod = await db.products.find_one({"product_id": pid}, {"_id": 0})
     if not prod:
         raise HTTPException(404, "Not found")
-    if prod["farmer_id"] != user.user_id and user.role != "admin":
+    if prod["farmer_id"] != user.user_id and not is_admin_role(user.role):
         raise HTTPException(403, "Forbidden")
     updates = {k: v for k, v in req.model_dump(exclude_unset=True).items() if v is not None}
     # If images are replaced, cascade-delete removed Cloudinary assets
@@ -1502,7 +1613,7 @@ async def cloudinary_delete(
     if not pid:
         raise HTTPException(400, "public_id required")
 
-    if user.role != "admin" and not cloudinary_user_owns(pid, user.user_id):
+    if not is_admin_role(user.role) and not cloudinary_user_owns(pid, user.user_id):
         owning_product = await db.products.find_one(
             {"farmer_id": user.user_id, "images.public_id": pid},
             {"_id": 0, "product_id": 1},
@@ -1648,7 +1759,7 @@ async def delivery_estimate(req: DeliveryEstimateReq, user: User = Depends(get_c
 
 
 def _delivery_access_ok(d: dict, user: User) -> bool:
-    return user.role == "admin" or user.user_id in (d.get("buyer_id"), d.get("farmer_id"), d.get("assigned_to"))
+    return is_admin_role(user.role) or user.user_id in (d.get("buyer_id"), d.get("farmer_id"), d.get("assigned_to"))
 
 
 @api.get("/delivery/my-deliveries")
@@ -1674,7 +1785,7 @@ async def assign_delivery(did: str, req: DeliveryAssignReq, user: User = Depends
     d = await db.deliveries.find_one({"delivery_id": did}, {"_id": 0})
     if not d:
         raise HTTPException(404, "Delivery not found")
-    if user.role != "admin" and user.user_id != d.get("farmer_id"):
+    if not is_admin_role(user.role) and user.user_id != d.get("farmer_id"):
         raise HTTPException(403, "Only admin or the selling farmer can assign a delivery partner")
     partner = await db.users.find_one({"user_id": req.delivery_partner_id, "role": "delivery_partner"}, {"_id": 0})
     if not partner:
@@ -1684,6 +1795,8 @@ async def assign_delivery(did: str, req: DeliveryAssignReq, user: User = Depends
         {"$set": {"assigned_to": req.delivery_partner_id, "status": "assigned"},
          "$push": {"tracking_history": {"status": "assigned", "at": now_iso(), "note": f"Assigned to {partner['name']}"}}},
     )
+    if is_admin_role(user.role):
+        await log_admin_activity(user, "delivery_assigned", target_type="delivery", target_id=did, detail=partner["name"])
     return await db.deliveries.find_one({"delivery_id": did}, {"_id": 0})
 
 
@@ -1713,7 +1826,7 @@ async def admin_list_deliveries(
     status: Optional[str] = None, method: Optional[str] = None, limit: int = 300,
     user: User = Depends(get_current_user),
 ):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     query: dict = {}
     if status:
@@ -1725,7 +1838,7 @@ async def admin_list_deliveries(
 
 @api.get("/admin/delivery-analytics")
 async def admin_delivery_analytics(user: User = Depends(get_current_user)):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     by_status = await db.deliveries.aggregate(
         [{"$group": {"_id": "$status", "count": {"$sum": 1}}}]
@@ -1737,6 +1850,66 @@ async def admin_delivery_analytics(user: User = Depends(get_current_user)):
         "by_status": {r["_id"]: r["count"] for r in by_status},
         "by_method": {r["_id"]: {"count": r["count"], "total_charge": round(r["total_charge"], 2)} for r in by_method},
     }
+
+
+# ------------------ Website Content (public + Super Admin) ------------------
+@api.get("/site-content")
+async def public_site_content():
+    return await get_site_content()
+
+
+@api.get("/admin/site-content")
+async def admin_get_site_content(user: User = Depends(get_current_user)):
+    require_super_admin(user)
+    return await get_site_content()
+
+
+@api.put("/admin/site-content")
+async def admin_update_site_content(req: SiteContentUpdateReq, user: User = Depends(get_current_user)):
+    require_super_admin(user)
+    updates = {k: v for k, v in req.model_dump(exclude_none=True).items()}
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+    await db.site_content.update_one({"content_id": SITE_CONTENT_DOC_ID}, {"$set": updates}, upsert=True)
+    await log_admin_activity(user, "site_content_updated", target_type="site_content", detail=str(list(updates.keys())))
+    return await get_site_content()
+
+
+# ------------------ Maintenance Mode ------------------
+@api.get("/maintenance-status")
+async def public_maintenance_status():
+    m = await get_maintenance()
+    return {"enabled": m["enabled"], "message": m["message"]}
+
+
+@api.get("/admin/maintenance")
+async def admin_get_maintenance(user: User = Depends(get_current_user)):
+    require_super_admin(user)
+    return await get_maintenance()
+
+
+@api.put("/admin/maintenance")
+async def admin_update_maintenance(req: MaintenanceUpdateReq, user: User = Depends(get_current_user)):
+    require_super_admin(user)
+    updates = {"enabled": req.enabled}
+    if req.message is not None:
+        updates["message"] = req.message
+    await db.maintenance.update_one({"maintenance_id": MAINTENANCE_DOC_ID}, {"$set": updates}, upsert=True)
+    await log_admin_activity(user, "maintenance_mode_toggled", target_type="maintenance", detail=str(updates))
+    return await get_maintenance()
+
+
+# ------------------ Admin Activity Logs ------------------
+@api.get("/admin/activity-logs")
+async def admin_activity_logs(admin_id: Optional[str] = None, action: Optional[str] = None, limit: int = 300,
+                               user: User = Depends(get_current_user)):
+    require_super_admin(user)
+    query: dict = {}
+    if admin_id:
+        query["admin_id"] = admin_id
+    if action:
+        query["action"] = action
+    return await db.admin_activity_logs.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
 
 
 @api.get("/settings")
@@ -1891,7 +2064,7 @@ async def razorpay_webhook(request: Request):
 @api.get("/payments")
 async def list_my_payments(user: User = Depends(get_current_user)):
     """Buyer's payment history (own only). Admin sees all."""
-    query = {} if user.role == "admin" else {"user_id": user.user_id}
+    query = {} if is_admin_role(user.role) else {"user_id": user.user_id}
     docs = await db.payments.find(query, {"_id": 0}).sort("created_at", -1).to_list(500)
     return docs
 
@@ -1901,7 +2074,7 @@ async def admin_list_payments(
     status: Optional[str] = None,
     user: User = Depends(get_current_user),
 ):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     q: dict = {}
     if status:
@@ -1956,7 +2129,7 @@ async def admin_refund(
     rzp_payment_id: str, req: RefundReq,
     user: User = Depends(get_current_user),
 ):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     if not razorpay_enabled():
         raise HTTPException(400, "Razorpay not configured")
@@ -1996,7 +2169,7 @@ async def download_invoice(oid: str, user: User = Depends(get_current_user)):
     order = await db.orders.find_one({"order_id": oid}, {"_id": 0})
     if not order:
         raise HTTPException(404, "Not found")
-    if user.role != "admin" and order["buyer_id"] != user.user_id:
+    if not is_admin_role(user.role) and order["buyer_id"] != user.user_id:
         raise HTTPException(403, "Forbidden")
     if order.get("payment_status") not in ("paid", "refunded"):
         raise HTTPException(400, "Invoice only available after payment")
@@ -2193,7 +2366,7 @@ async def admin_list_reviews(
     status: Optional[str] = None,
     user: User = Depends(get_current_user),
 ):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     q: dict = {}
     if status:
@@ -2210,7 +2383,7 @@ async def admin_list_reviews(
 
 @api.post("/admin/reviews/{rid}/moderate")
 async def admin_moderate(rid: str, req: ReviewModerateReq, user: User = Depends(get_current_user)):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     try:
         result = await svc_moderate_review(db, review_id=rid, action=req.action)
@@ -2222,7 +2395,7 @@ async def admin_moderate(rid: str, req: ReviewModerateReq, user: User = Depends(
 @api.get("/orders")
 async def list_orders(user: User = Depends(get_current_user)):
     docs: list = []
-    if user.role == "admin":
+    if is_admin_role(user.role):
         docs = await db.orders.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
     elif user.role == "farmer":
         prods = await db.products.find({"farmer_id": user.user_id}, {"_id": 0, "product_id": 1}).to_list(500)
@@ -2248,7 +2421,7 @@ async def stats(user: User = Depends(get_current_user)):
                 if it["product_id"] in my_prod_ids:
                     revenue += it["qty"] * it["price"]
         return {"products": prods, "orders": order_count, "revenue": revenue}
-    if user.role == "admin":
+    if is_admin_role(user.role):
         return {
             "users": await db.users.count_documents({}),
             "products": await db.products.count_documents({}),
@@ -2268,7 +2441,7 @@ async def admin_list_users(
     limit: int = 200,
     user: User = Depends(get_current_user),
 ):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     query: dict = {}
     if role:
@@ -2285,29 +2458,40 @@ async def admin_list_users(
 
 @api.patch("/admin/users/{uid}")
 async def admin_update_user(uid: str, req: AdminUserUpdateReq, user: User = Depends(get_current_user)):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
-    if uid == user.user_id and (req.banned or req.role not in (None, "admin")):
+    if uid == user.user_id and (req.banned or req.role not in (None, "admin", "super_admin")):
         raise HTTPException(400, "You cannot ban or demote your own account")
+    target = await db.users.find_one({"user_id": uid}, {"_id": 0, "password": 0})
+    if not target:
+        raise HTTPException(404, "User not found")
+    if user.role != "super_admin":
+        if is_admin_role(target.get("role", "")):
+            raise HTTPException(403, "Only Super Admin can modify an admin account")
+        if req.role in ("admin", "super_admin"):
+            raise HTTPException(403, "Only Super Admin can grant admin access")
     updates = {k: v for k, v in req.model_dump().items() if v is not None}
     if not updates:
         raise HTTPException(400, "Nothing to update")
-    result = await db.users.update_one({"user_id": uid}, {"$set": updates})
-    if result.matched_count == 0:
-        raise HTTPException(404, "User not found")
+    await db.users.update_one({"user_id": uid}, {"$set": updates})
     doc = await db.users.find_one({"user_id": uid}, {"_id": 0, "password": 0})
+    await log_admin_activity(user, "user_updated", target_type="user", target_id=uid, detail=str(updates))
     return doc
 
 
 @api.delete("/admin/users/{uid}")
 async def admin_delete_user(uid: str, user: User = Depends(get_current_user)):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     if uid == user.user_id:
         raise HTTPException(400, "You cannot delete your own account")
-    result = await db.users.delete_one({"user_id": uid})
-    if result.deleted_count == 0:
+    target = await db.users.find_one({"user_id": uid}, {"_id": 0})
+    if not target:
         raise HTTPException(404, "User not found")
+    if user.role != "super_admin" and is_admin_role(target.get("role", "")):
+        raise HTTPException(403, "Only Super Admin can delete an admin account")
+    await db.users.delete_one({"user_id": uid})
+    await log_admin_activity(user, "user_deleted", target_type="user", target_id=uid, detail=target.get("email"))
     return {"ok": True}
 
 
@@ -2320,7 +2504,7 @@ async def admin_list_products(
     limit: int = 300,
     user: User = Depends(get_current_user),
 ):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     query: dict = {}
     if category:
@@ -2339,7 +2523,7 @@ async def admin_list_products(
 
 @api.patch("/admin/products/{pid}")
 async def admin_update_product(pid: str, req: AdminProductUpdateReq, user: User = Depends(get_current_user)):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     updates = {k: v for k, v in req.model_dump().items() if v is not None}
     if not updates:
@@ -2348,43 +2532,44 @@ async def admin_update_product(pid: str, req: AdminProductUpdateReq, user: User 
     if result.matched_count == 0:
         raise HTTPException(404, "Product not found")
     doc = await db.products.find_one({"product_id": pid}, {"_id": 0})
+    await log_admin_activity(user, "product_updated", target_type="product", target_id=pid, detail=str(updates))
     return doc
 
 
 @api.delete("/admin/products/{pid}")
 async def admin_delete_product(pid: str, user: User = Depends(get_current_user)):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     result = await db.products.delete_one({"product_id": pid})
     if result.deleted_count == 0:
         raise HTTPException(404, "Product not found")
+    await log_admin_activity(user, "product_deleted", target_type="product", target_id=pid)
     return {"ok": True}
 
 
 # ------------------ Admin: Orders ------------------
 @api.patch("/admin/orders/{oid}")
 async def admin_update_order(oid: str, req: AdminOrderUpdateReq, user: User = Depends(get_current_user)):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     result = await db.orders.update_one({"order_id": oid}, {"$set": {"status": req.status}})
     if result.matched_count == 0:
         raise HTTPException(404, "Order not found")
     doc = await db.orders.find_one({"order_id": oid}, {"_id": 0})
+    await log_admin_activity(user, "order_status_updated", target_type="order", target_id=oid, detail=req.status)
     return doc
 
 
 # ------------------ Admin: Site Settings (platform fee / delivery charge) ------------------
 @api.get("/admin/settings")
 async def admin_get_settings(user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
+    require_super_admin(user)
     return await get_settings()
 
 
 @api.put("/admin/settings")
 async def admin_update_settings(req: AdminSettingsUpdateReq, user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
+    require_super_admin(user)
     updates = {k: v for k, v in req.model_dump().items() if v is not None}
     if not updates:
         raise HTTPException(400, "Nothing to update")
@@ -2393,6 +2578,7 @@ async def admin_update_settings(req: AdminSettingsUpdateReq, user: User = Depend
     if "delivery_charge" in updates and updates["delivery_charge"] < 0:
         raise HTTPException(400, "Delivery charge cannot be negative")
     await db.settings.update_one({"settings_id": SETTINGS_DOC_ID}, {"$set": updates}, upsert=True)
+    await log_admin_activity(user, "settings_updated", target_type="settings", detail=str(updates))
     return await get_settings()
 
 
@@ -2402,8 +2588,7 @@ async def admin_security_logs(
     event_type: Optional[str] = None, email: Optional[str] = None, limit: int = 200,
     user: User = Depends(get_current_user),
 ):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
+    require_super_admin(user)
     query: dict = {}
     if event_type:
         query["event_type"] = event_type
@@ -2414,8 +2599,7 @@ async def admin_security_logs(
 
 @api.get("/admin/locked-accounts")
 async def admin_locked_accounts(user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
+    require_super_admin(user)
     now = datetime.now(timezone.utc)
     docs = await db.login_attempts.find({"locked_until": {"$gt": now}}, {"_id": 0}).to_list(200)
     return docs
@@ -2423,8 +2607,7 @@ async def admin_locked_accounts(user: User = Depends(get_current_user)):
 
 @api.post("/admin/unlock-account")
 async def admin_unlock_account(identifier: str, user: User = Depends(get_current_user)):
-    if user.role != "admin":
-        raise HTTPException(403, "Admin only")
+    require_super_admin(user)
     result = await db.login_attempts.delete_one({"identifier": identifier})
     if result.deleted_count == 0:
         raise HTTPException(404, "No lockout found for that identifier")
@@ -2434,7 +2617,7 @@ async def admin_unlock_account(identifier: str, user: User = Depends(get_current
 # ------------------ Admin: Categories ------------------
 @api.get("/admin/categories")
 async def admin_list_categories(user: User = Depends(get_current_user)):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     docs = await db.categories.find({}, {"_id": 0}).sort("name", 1).to_list(200)
     return docs
@@ -2442,33 +2625,36 @@ async def admin_list_categories(user: User = Depends(get_current_user)):
 
 @api.post("/admin/categories")
 async def admin_create_category(req: CategoryReq, user: User = Depends(get_current_user)):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     if await db.categories.find_one({"id": req.id}):
         raise HTTPException(409, "Category id already exists")
     doc = req.model_dump()
     await db.categories.insert_one(doc)
     doc.pop("_id", None)
+    await log_admin_activity(user, "category_created", target_type="category", target_id=req.id)
     return doc
 
 
 @api.put("/admin/categories/{cid}")
 async def admin_update_category(cid: str, req: CategoryReq, user: User = Depends(get_current_user)):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     result = await db.categories.update_one({"id": cid}, {"$set": {"name": req.name, "icon": req.icon}})
     if result.matched_count == 0:
         raise HTTPException(404, "Category not found")
+    await log_admin_activity(user, "category_updated", target_type="category", target_id=cid)
     return await db.categories.find_one({"id": cid}, {"_id": 0})
 
 
 @api.delete("/admin/categories/{cid}")
 async def admin_delete_category(cid: str, user: User = Depends(get_current_user)):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     result = await db.categories.delete_one({"id": cid})
     if result.deleted_count == 0:
         raise HTTPException(404, "Category not found")
+    await log_admin_activity(user, "category_deleted", target_type="category", target_id=cid)
     return {"ok": True}
 
 
@@ -2482,7 +2668,7 @@ async def public_banners():
 
 @api.get("/admin/banners")
 async def admin_list_banners(user: User = Depends(get_current_user)):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     docs = await db.banners.find({}, {"_id": 0}).sort("sort_order", 1).to_list(100)
     return docs
@@ -2490,32 +2676,35 @@ async def admin_list_banners(user: User = Depends(get_current_user)):
 
 @api.post("/admin/banners")
 async def admin_create_banner(req: BannerReq, user: User = Depends(get_current_user)):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     bid = f"banner_{uuid.uuid4().hex[:10]}"
     doc = {"banner_id": bid, **req.model_dump(), "created_at": now_iso()}
     await db.banners.insert_one(doc)
     doc.pop("_id", None)
+    await log_admin_activity(user, "banner_created", target_type="banner", target_id=bid)
     return doc
 
 
 @api.put("/admin/banners/{bid}")
 async def admin_update_banner(bid: str, req: BannerReq, user: User = Depends(get_current_user)):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     result = await db.banners.update_one({"banner_id": bid}, {"$set": req.model_dump()})
     if result.matched_count == 0:
         raise HTTPException(404, "Banner not found")
+    await log_admin_activity(user, "banner_updated", target_type="banner", target_id=bid)
     return await db.banners.find_one({"banner_id": bid}, {"_id": 0})
 
 
 @api.delete("/admin/banners/{bid}")
 async def admin_delete_banner(bid: str, user: User = Depends(get_current_user)):
-    if user.role != "admin":
+    if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     result = await db.banners.delete_one({"banner_id": bid})
     if result.deleted_count == 0:
         raise HTTPException(404, "Banner not found")
+    await log_admin_activity(user, "banner_deleted", target_type="banner", target_id=bid)
     return {"ok": True}
 
 
@@ -2656,9 +2845,19 @@ async def startup_indexes():
         await db.security_logs.create_index("event_type")
         await db.password_reset_requests.create_index("email")
         await db.password_reset_requests.create_index("created_at", expireAfterSeconds=int(RESET_REQUEST_WINDOW.total_seconds()) * 2)
+        await db.admin_activity_logs.create_index("created_at")
+        await db.admin_activity_logs.create_index("admin_id")
         # Seed categories from the built-in defaults on first run only, so
         # admin edits/additions afterwards are never overwritten.
         if await db.categories.count_documents({}) == 0:
             await db.categories.insert_many([dict(c) for c in CATEGORIES])
+        # One-time bootstrap: if there's no super_admin yet, promote the
+        # earliest-created admin account so Super Admin features are usable
+        # without needing direct database access.
+        if await db.users.count_documents({"role": "super_admin"}) == 0:
+            oldest_admin = await db.users.find_one({"role": "admin"}, {"_id": 0, "user_id": 1}, sort=[("created_at", 1)])
+            if oldest_admin:
+                await db.users.update_one({"user_id": oldest_admin["user_id"]}, {"$set": {"role": "super_admin"}})
+                logger.info("Bootstrapped user_id=%s to super_admin (no super_admin existed yet)", oldest_admin["user_id"])
     except Exception as e:
         logger.exception("Index creation failed: %s", e)
