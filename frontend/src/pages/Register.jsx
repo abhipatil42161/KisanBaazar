@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { api, setAccessToken } from "@/lib/api";
+import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
 import { Sprout, Users, Globe, Eye, EyeOff, ShieldCheck, Loader2, Mail, RotateCcw, CheckCircle2 } from "lucide-react";
@@ -133,18 +133,8 @@ export default function Register() {
         // FastAPI validation error — surface the first message
         const first = detail[0]?.msg?.replace("Value error, ", "") || "Validation failed";
         toast.error(first);
-      } else if (err?.response) {
-        // Server responded with an explicit error (4xx/5xx)
-        toast.error(detail || "Registration failed");
       } else {
-        // No response at all — network drop, or backend was cold-starting.
-        // The request may still complete server-side even though this
-        // client gave up waiting, so don't say "failed" with certainty.
-        toast.error(
-          "Couldn't confirm the server's response — this can happen when the " +
-          "server is waking up. Please wait ~30s and check if you already " +
-          "received an OTP before trying again.",
-        );
+        toast.error(detail || "Registration failed");
       }
     } finally { setBusy(false); }
   };
@@ -157,7 +147,6 @@ export default function Register() {
       const { data } = await api.post("/auth/register/verify-otp", {
         otp_session: otp.session, code: otp.digits,
       });
-      if (data.access_token) setAccessToken(data.access_token);
       await refresh?.();
       toast.success(`Welcome ${data.user.name}!`);
       nav(
@@ -166,14 +155,7 @@ export default function Register() {
         : "/dashboard/buyer",
       );
     } catch (err) {
-      if (err?.response) {
-        toast.error(err.response.data?.detail || "Verification failed");
-      } else {
-        toast.error(
-          "Couldn't confirm the server's response — please wait a moment " +
-          "and try the code again before requesting a new one.",
-        );
-      }
+      toast.error(err?.response?.data?.detail || "Verification failed");
     } finally { setBusy(false); }
   }, [otp.digits, otp.session, refresh, nav]);
 

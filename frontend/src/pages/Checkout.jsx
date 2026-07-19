@@ -10,6 +10,7 @@ import { useCart } from "@/contexts/CartContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
 import { CreditCard, Smartphone, Wallet, Building2, CheckCircle2, Truck } from "lucide-react";
+import { useSiteSettings, computeTotal } from "@/hooks/useSiteSettings";
 
 const METHODS = [
   { id: "upi", label: "UPI (PhonePe, GPay, Paytm)", icon: Smartphone },
@@ -17,6 +18,14 @@ const METHODS = [
   { id: "netbanking", label: "Net Banking", icon: Building2 },
   { id: "wallet", label: "Wallets", icon: Wallet },
   { id: "cod", label: "Cash on Delivery", icon: Truck },
+];
+
+const DELIVERY_METHODS = [
+  { id: "pickup", label: "Buyer Pickup (Free)" },
+  { id: "local_delivery", label: "Local Delivery Boy" },
+  { id: "courier", label: "Courier" },
+  { id: "transport", label: "Transport (bulk orders)" },
+  { id: "seller_delivery", label: "Seller Self-Delivery" },
 ];
 
 const RAZORPAY_SDK = "https://checkout.razorpay.com/v1/checkout.js";
@@ -42,10 +51,15 @@ const loadRazorpay = () => new Promise((resolve) => {
 export default function Checkout() {
   const nav = useNavigate();
   const { items, total, clear } = useCart();
+  const settings = useSiteSettings();
   const { user } = useAuth();
   const [addr, setAddr] = useState(user?.location || "");
   const [phone, setPhone] = useState(user?.phone || "");
   const [method, setMethod] = useState("upi");
+  const [deliveryMethod, setDeliveryMethod] = useState("courier");
+  const [buyerPincode, setBuyerPincode] = useState("");
+  const [vehicleType, setVehicleType] = useState("tempo");
+  const [deliveryEstimate, setDeliveryEstimate] = useState(null); // { charge, seller_delivery_available }
   const [busy, setBusy] = useState(false);
   const [orderId, setOrderId] = useState(null);
   const [payCfg, setPayCfg] = useState({ enabled: false, key_id: null });
@@ -55,6 +69,22 @@ export default function Checkout() {
       .then(({ data }) => setPayCfg(data))
       .catch(() => setPayCfg({ enabled: false, key_id: null }));
   }, []);
+
+  // Live delivery-charge preview, based on the first cart item (backend uses
+  // a single farmer's pincode/weight for the whole order — same simplification).
+  useEffect(() => {
+    if (!items.length) return;
+    const t = setTimeout(() => {
+      api.post("/delivery/estimate", {
+        method: deliveryMethod, product_id: items[0].product_id, qty: items[0].qty,
+        buyer_pincode: buyerPincode || undefined, vehicle_type: deliveryMethod === "transport" ? vehicleType : undefined,
+      }).then(({ data }) => setDeliveryEstimate(data)).catch(() => setDeliveryEstimate(null));
+    }, 400);
+    return () => clearTimeout(t);
+  }, [deliveryMethod, buyerPincode, vehicleType, items]);
+
+  const deliveryCharge = deliveryEstimate?.charge ?? settings.delivery_charge ?? 0;
+  const { fee, total: grandTotal } = computeTotal(total, { ...settings, delivery_charge: deliveryCharge });
 
   const finishMock = useCallback(async (order) => {
     await api.post(`/orders/${order.order_id}/pay`);
@@ -123,6 +153,9 @@ export default function Checkout() {
         })),
         delivery_address: `${addr} · Phone: ${phone}`,
         payment_method: method,
+        delivery_method: deliveryMethod,
+        buyer_pincode: buyerPincode || undefined,
+        vehicle_type: deliveryMethod === "transport" ? vehicleType : undefined,
       });
       if (method === "cod" || !payCfg.enabled || !order.razorpay_order_id?.startsWith("order_")) {
         // COD, no real gateway configured, or fell back to mock id → mock pay.
@@ -137,7 +170,15 @@ export default function Checkout() {
     } finally {
       setBusy(false);
     }
-  }, [addr, phone, items, method, payCfg, finishMock, finishRazorpay]);
+  }, [addr, phone, items, method, deliveryMethod, buyerPincode, vehicleType, payCfg, finishMock, finishRazorpay]);
+
+  const [deliveryInfo, setDeliveryInfo] = useState(null);
+
+  useEffect(() => {
+    if (orderId) {
+      api.get(`/delivery/order/${orderId}`).then(({ data }) => setDeliveryInfo(data)).catch(() => setDeliveryInfo(null));
+    }
+  }, [orderId]);
 
   if (orderId) {
     return (
@@ -152,6 +193,12 @@ export default function Checkout() {
               ? "Razorpay payment processed securely."
               : "MOCK Razorpay payment processed (test mode)."}
         </p>
+        {deliveryInfo && deliveryInfo.method !== "pickup" && deliveryInfo.method !== "courier" && (
+          <div className="mt-4 inline-block bg-primary/5 border-2 border-primary/20 rounded-xl px-6 py-3">
+            <p className="text-xs text-muted-foreground">Share this OTP with the delivery person on arrival</p>
+            <p className="font-heading font-bold text-2xl tracking-widest text-primary">{deliveryInfo.otp}</p>
+          </div>
+        )}
         <div className="flex gap-3 justify-center mt-6">
           <Button data-testid="view-orders-btn" onClick={() => nav("/dashboard/buyer")} className="h-12 px-6 rounded-xl">View Orders</Button>
           <Button data-testid="continue-shop-btn" variant="outline" onClick={() => nav("/products")} className="h-12 px-6 rounded-xl">Continue Shopping</Button>
@@ -173,6 +220,42 @@ export default function Checkout() {
               <Input data-testid="checkout-phone" value={phone} onChange={(e) => setPhone(e.target.value)}
                 placeholder="Phone number" className="h-12 rounded-xl" />
             </div>
+          </div>
+
+          <div className="bg-card border-2 border-border rounded-2xl p-6">
+            <h3 className="font-heading font-semibold text-xl mb-4">Delivery Method</h3>
+            <RadioGroup value={deliveryMethod} onValueChange={setDeliveryMethod} className="space-y-2">
+              {DELIVERY_METHODS.filter((m) => m.id !== "seller_delivery" || deliveryEstimate?.seller_delivery_available).map((m) => (
+                <Label key={m.id} htmlFor={`dm-${m.id}`} data-testid={`delivery-${m.id}`}
+                  className={`flex items-center gap-3 p-4 rounded-xl border-2 cursor-pointer transition-colors ${
+                    deliveryMethod === m.id ? "border-primary bg-primary/5" : "border-border hover:bg-muted"
+                  }`}>
+                  <RadioGroupItem value={m.id} id={`dm-${m.id}`} />
+                  <span className="font-medium">{m.label}</span>
+                </Label>
+              ))}
+            </RadioGroup>
+            {deliveryMethod !== "pickup" && (
+              <div className="mt-4 grid sm:grid-cols-2 gap-3">
+                <div>
+                  <Label className="text-xs text-muted-foreground">Your PIN code</Label>
+                  <Input data-testid="checkout-pincode" value={buyerPincode} onChange={(e) => setBuyerPincode(e.target.value)}
+                    placeholder="6-digit PIN" maxLength={6} className="h-10 rounded-xl mt-1" />
+                </div>
+                {deliveryMethod === "transport" && (
+                  <div>
+                    <Label className="text-xs text-muted-foreground">Vehicle type</Label>
+                    <RadioGroup value={vehicleType} onValueChange={setVehicleType} className="flex gap-3 mt-2">
+                      {["mini_truck", "tempo", "truck"].map((v) => (
+                        <Label key={v} className="flex items-center gap-1.5 text-sm cursor-pointer">
+                          <RadioGroupItem value={v} id={`vt-${v}`} /> {v.replace("_", " ")}
+                        </Label>
+                      ))}
+                    </RadioGroup>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="bg-card border-2 border-border rounded-2xl p-6">
@@ -209,14 +292,15 @@ export default function Checkout() {
           </div>
           <div className="border-t border-border pt-3 mt-3 space-y-1.5 text-sm">
             <div className="flex justify-between"><span className="text-muted-foreground">Subtotal</span><span>₹{total.toLocaleString()}</span></div>
-            <div className="flex justify-between"><span className="text-muted-foreground">Platform fee</span><span>₹{Math.round(total * 0.01)}</span></div>
+            {deliveryCharge > 0 && <div className="flex justify-between"><span className="text-muted-foreground">Delivery ({DELIVERY_METHODS.find((m) => m.id === deliveryMethod)?.label})</span><span>₹{deliveryCharge.toLocaleString()}</span></div>}
+            <div className="flex justify-between"><span className="text-muted-foreground">Platform fee ({settings.platform_fee_percent}%)</span><span>₹{fee.toLocaleString()}</span></div>
             <div className="flex justify-between font-heading font-bold text-xl pt-2">
-              <span>Total</span><span className="text-primary">₹{Math.round(total * 1.01).toLocaleString()}</span>
+              <span>Total</span><span className="text-primary">₹{grandTotal.toLocaleString()}</span>
             </div>
           </div>
           <Button data-testid="place-order-btn" onClick={placeOrder} disabled={busy}
             className="w-full mt-6 h-12 rounded-xl bg-primary hover:bg-primary/90 font-semibold">
-            {busy ? "Processing…" : method === "cod" ? "Place Order (COD)" : `Pay ₹${Math.round(total * 1.01).toLocaleString()}`}
+            {busy ? "Processing…" : method === "cod" ? "Place Order (COD)" : `Pay ₹${grandTotal.toLocaleString()}`}
           </Button>
         </div>
       </div>

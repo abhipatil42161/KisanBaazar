@@ -1,76 +1,72 @@
 import { useCallback, useEffect, useState } from "react";
 import { getJson, api } from "@/lib/api";
-import { Users, Package, ShoppingBag, IndianRupee, Search, ShieldAlert, Truck, Plus } from "lucide-react";
+import { Users, Package, ShoppingBag, IndianRupee, Search, ShieldAlert } from "lucide-react";
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
-import { toast } from "sonner";
 import PaymentHistoryList, { fetchAdminPayments } from "@/components/PaymentHistoryList";
 import ReviewList from "@/components/ReviewList";
+import AdminUsersPanel from "@/components/admin/AdminUsersPanel";
+import AdminProductsPanel from "@/components/admin/AdminProductsPanel";
+import AdminOrdersPanel from "@/components/admin/AdminOrdersPanel";
+import AdminSettingsPanel from "@/components/admin/AdminSettingsPanel";
+import AdminCategoriesPanel from "@/components/admin/AdminCategoriesPanel";
+import AdminBannersPanel from "@/components/admin/AdminBannersPanel";
+import AdminDeliveryPanel from "@/components/admin/AdminDeliveryPanel";
+import AdminSecurityPanel from "@/components/admin/AdminSecurityPanel";
+import AdminWebsitePanel from "@/components/admin/AdminWebsitePanel";
+import AdminActivityLogPanel from "@/components/admin/AdminActivityLogPanel";
+import { useAuth } from "@/contexts/AuthContext";
 
 const fetchAdminData = async () => {
   const [statsR, ordersR, paymentsR] = await Promise.allSettled([
-    getJson("/dashboard/stats"),
-    getJson("/orders"),
-    fetchAdminPayments(),
+    getJson("/dashboard/stats"), getJson("/orders"), fetchAdminPayments(),
   ]);
-
-  const label = { statsR: "dashboard stats", ordersR: "orders", paymentsR: "payments" };
-  [["statsR", statsR], ["ordersR", ordersR], ["paymentsR", paymentsR]].forEach(([key, r]) => {
-    if (r.status === "rejected") {
-      // eslint-disable-next-line no-console
-      console.error(`[AdminDashboard] failed to load ${label[key]}:`, r.reason);
-      toast.error(`Couldn't load ${label[key]} — showing what's available`);
-    }
-  });
-
   return {
     stats: statsR.status === "fulfilled" ? statsR.value : {},
     orders: ordersR.status === "fulfilled" ? ordersR.value : [],
     payments: paymentsR.status === "fulfilled" ? paymentsR.value : [],
+    errors: {
+      stats: statsR.status === "rejected",
+      orders: ordersR.status === "rejected",
+      payments: paymentsR.status === "rejected",
+    },
   };
 };
 
+const SECTIONS = [
+  { id: "overview", label: "Overview" },
+  { id: "users", label: "Users" },
+  { id: "products", label: "Products" },
+  { id: "orders", label: "Orders" },
+  { id: "delivery", label: "Delivery" },
+  { id: "settings", label: "Fees & Delivery", superAdminOnly: true },
+  { id: "categories", label: "Categories" },
+  { id: "banners", label: "Banners" },
+  { id: "security", label: "Security", superAdminOnly: true },
+  { id: "website", label: "Website", superAdminOnly: true },
+  { id: "activity", label: "Activity Log", superAdminOnly: true },
+];
+
 export default function AdminDashboard() {
-  const [data, setData] = useState({ stats: {}, orders: [], payments: [] });
+  const { user } = useAuth();
+  const isSuperAdmin = user?.role === "super_admin";
+  const visibleSections = SECTIONS.filter((s) => !s.superAdminOnly || isSuperAdmin);
+  const [section, setSection] = useState("overview");
+  const [data, setData] = useState({ stats: {}, orders: [], payments: [], errors: {} });
   const [tab, setTab] = useState("all"); // all | captured | failed | refunded
   const [q, setQ] = useState("");
   const [reviews, setReviews] = useState([]);
-  const [partners, setPartners] = useState([]);
-  const [partnerForm, setPartnerForm] = useState({ name: "", email: "", password: "", phone: "" });
-  const [creatingPartner, setCreatingPartner] = useState(false);
   const reload = useCallback(() => { fetchAdminData().then(setData); }, []);
   const loadReviews = useCallback(() => {
     api.get("/admin/reviews?status=reported")
       .then((r) => setReviews(r.data || []))
       .catch(() => setReviews([]));
   }, []);
-  const loadPartners = useCallback(() => {
-    getJson("/admin/delivery-partners")
-      .then(setPartners)
-      .catch(() => setPartners([]));
-  }, []);
-  useEffect(() => { reload(); loadReviews(); loadPartners(); }, [reload, loadReviews, loadPartners]);
+  useEffect(() => { reload(); loadReviews(); }, [reload, loadReviews]);
+  useEffect(() => {
+    if (!visibleSections.some((s) => s.id === section)) setSection("overview");
+  }, [section, visibleSections]);
 
-  const createPartner = async (e) => {
-    e.preventDefault();
-    if (!partnerForm.name || !partnerForm.email || partnerForm.password.length < 8) {
-      toast.error("Name, email, and an 8+ character password are required");
-      return;
-    }
-    setCreatingPartner(true);
-    try {
-      await api.post("/admin/delivery-partners", partnerForm);
-      toast.success("Delivery partner account created");
-      setPartnerForm({ name: "", email: "", password: "", phone: "" });
-      loadPartners();
-    } catch (err) {
-      toast.error(err?.response?.data?.detail || "Couldn't create delivery partner");
-    } finally {
-      setCreatingPartner(false);
-    }
-  };
-
-  const { stats, orders, payments } = data;
+  const { stats, orders, payments, errors = {} } = data;
   const needle = q.trim().toLowerCase();
   const filtered = payments
     .filter((p) => tab === "all" || p.status === tab)
@@ -91,6 +87,33 @@ export default function AdminDashboard() {
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <h1 className="font-heading font-bold text-3xl">Admin Dashboard</h1>
       <p className="text-muted-foreground mt-1">Platform overview</p>
+
+      <div className="flex gap-2 flex-wrap mt-5 mb-6 border-b border-border pb-4">
+        {visibleSections.map((s) => (
+          <button key={s.id} onClick={() => setSection(s.id)}
+            className={`px-4 h-9 rounded-xl text-sm font-medium transition-colors ${
+              section === s.id ? "bg-primary text-primary-foreground" : "bg-muted hover:bg-muted/70"
+            }`}>
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      {section === "users" && <AdminUsersPanel />}
+      {section === "products" && <AdminProductsPanel />}
+      {section === "orders" && <AdminOrdersPanel />}
+      {section === "delivery" && <AdminDeliveryPanel />}
+      {section === "settings" && <AdminSettingsPanel />}
+      {section === "categories" && <AdminCategoriesPanel />}
+      {section === "banners" && <AdminBannersPanel />}
+      {section === "security" && <AdminSecurityPanel />}
+      {section === "website" && <AdminWebsitePanel />}
+      {section === "activity" && <AdminActivityLogPanel />}
+
+      {section === "overview" && <>
+      {errors.stats && <ErrorBanner label="dashboard stats" onRetry={reload} />}
+      {errors.orders && <ErrorBanner label="orders" onRetry={reload} />}
+      {errors.payments && <ErrorBanner label="payments" onRetry={reload} />}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mt-6 mb-8">
         <S icon={Users} label="Users" value={stats.users || 0} color="bg-blue-500" />
@@ -157,44 +180,18 @@ export default function AdminDashboard() {
         <span className="text-xs text-muted-foreground font-normal">({reviews.length} reported)</span>
       </h2>
       <ReviewList reviews={reviews} role="admin" onChange={loadReviews} showProductTitle />
+      </>}
+    </div>
+  );
+}
 
-      <h2 className="font-heading font-semibold text-xl mb-3 mt-10 flex items-center gap-2">
-        <Truck className="text-primary" size={20} />
-        Delivery Partners
-        <span className="text-xs text-muted-foreground font-normal">({partners.length})</span>
-      </h2>
-      <form onSubmit={createPartner} className="bg-card border-2 border-border rounded-2xl p-4 mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-        <Input placeholder="Full name" value={partnerForm.name}
-          onChange={(e) => setPartnerForm((f) => ({ ...f, name: e.target.value }))} />
-        <Input type="email" placeholder="Email" value={partnerForm.email}
-          onChange={(e) => setPartnerForm((f) => ({ ...f, email: e.target.value }))} />
-        <Input type="password" placeholder="Password (8+ chars)" value={partnerForm.password}
-          onChange={(e) => setPartnerForm((f) => ({ ...f, password: e.target.value }))} />
-        <Input placeholder="Phone (optional)" value={partnerForm.phone}
-          onChange={(e) => setPartnerForm((f) => ({ ...f, phone: e.target.value }))} />
-        <Button type="submit" disabled={creatingPartner}>
-          <Plus size={16} className="mr-1" /> Add partner
-        </Button>
-      </form>
-      <div className="bg-card border-2 border-border rounded-2xl overflow-hidden mb-10">
-        <table className="w-full text-sm">
-          <thead className="bg-muted/50">
-            <tr className="text-left">
-              <th className="p-3">Name</th><th className="p-3">Email</th><th className="p-3">Phone</th>
-            </tr>
-          </thead>
-          <tbody>
-            {partners.map((p) => (
-              <tr key={p.user_id} className="border-t border-border">
-                <td className="p-3">{p.name}</td>
-                <td className="p-3">{p.email}</td>
-                <td className="p-3">{p.phone || "—"}</td>
-              </tr>
-            ))}
-            {partners.length === 0 && <tr><td colSpan={3} className="p-6 text-center text-muted-foreground">No delivery partners yet</td></tr>}
-          </tbody>
-        </table>
-      </div>
+function ErrorBanner({ label, onRetry }) {
+  return (
+    <div className="bg-red-50 border-2 border-red-200 text-red-700 rounded-xl p-4 mb-4 flex items-center justify-between gap-3 text-sm font-medium">
+      <span>Couldn't load {label} — showing what's available</span>
+      <button onClick={onRetry} className="shrink-0 px-3 py-1.5 rounded-lg bg-red-100 hover:bg-red-200 text-red-800 text-xs font-semibold">
+        Retry
+      </button>
     </div>
   );
 }

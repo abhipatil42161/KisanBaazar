@@ -3,10 +3,13 @@ import { Button } from "@/components/ui/button";
 import { useCart } from "@/contexts/CartContext";
 import { Trash2, Plus, Minus, ShoppingCart } from "lucide-react";
 import { imgUrl } from "@/lib/images";
+import { useSiteSettings, computeTotal } from "@/hooks/useSiteSettings";
 
 export default function Cart() {
   const { items, total, remove, updateQty } = useCart();
   const nav = useNavigate();
+  const settings = useSiteSettings();
+  const { fee, delivery, total: grandTotal } = computeTotal(total, settings);
 
   if (items.length === 0) {
     return (
@@ -58,10 +61,10 @@ export default function Cart() {
           <h3 className="font-heading font-semibold text-xl mb-4">Order Summary</h3>
           <div className="space-y-2 text-sm">
             <div className="flex justify-between"><span className="text-muted-foreground">Subtotal</span><span>₹{total.toLocaleString()}</span></div>
-            <div className="flex justify-between"><span className="text-muted-foreground">Shipping</span><span className="text-primary">Free</span></div>
-            <div className="flex justify-between"><span className="text-muted-foreground">Platform fee (1%)</span><span>₹{Math.round(total * 0.01)}</span></div>
+            <div className="flex justify-between"><span className="text-muted-foreground">Delivery</span><span className={delivery ? "" : "text-primary"}>{delivery ? `₹${delivery.toLocaleString()}` : "Free"}</span></div>
+            <div className="flex justify-between"><span className="text-muted-foreground">Platform fee ({settings.platform_fee_percent}%)</span><span>₹{fee.toLocaleString()}</span></div>
             <div className="border-t border-border pt-3 mt-3 flex justify-between font-heading font-bold text-xl">
-              <span>Total</span><span className="text-primary">₹{Math.round(total * 1.01).toLocaleString()}</span>
+              <span>Total</span><span className="text-primary">₹{grandTotal.toLocaleString()}</span>
             </div>
           </div>
           <Button data-testid="cart-checkout-btn" className="w-full mt-6 h-12 rounded-xl bg-primary hover:bg-primary/90 font-semibold"

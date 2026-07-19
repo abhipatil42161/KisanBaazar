@@ -20,7 +20,7 @@ export default function Login() {
     try {
       const u = await login(email, pw);
       toast.success(`Welcome back, ${u.name}!`);
-      nav(u.role === "farmer" ? "/dashboard/farmer" : u.role === "admin" ? "/dashboard/admin" : "/dashboard/buyer");
+      nav(u.role === "farmer" ? "/dashboard/farmer" : (u.role === "admin" || u.role === "super_admin") ? "/dashboard/admin" : u.role === "delivery_partner" ? "/dashboard/delivery" : "/dashboard/buyer");
     } catch (e) {
       const status = e.response?.status;
       const msg = e.response?.data?.detail || "Login failed";
