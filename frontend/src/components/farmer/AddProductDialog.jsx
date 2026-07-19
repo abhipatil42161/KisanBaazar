@@ -14,7 +14,7 @@ import ImageUploader from "@/components/ImageUploader";
 const EMPTY = {
   title: "", description: "", category: "vegetables", price: "", unit: "kg", moq: 1, available_qty: 100,
   quality_grade: "A", organic: false, export_ready: false, images: [], location: "", state: "",
-  harvest_date: "", auction: false,
+  harvest_date: "", auction: false, pincode: "", weight_per_unit_kg: 1, seller_delivery_charge: "",
 };
 
 /**
@@ -54,6 +54,9 @@ export default function ProductFormDialog({ cats, onSaved, existing = null, trig
             state: existing.state || "",
             harvest_date: existing.harvest_date || "",
             auction: !!existing.auction,
+            pincode: existing.pincode || "",
+            weight_per_unit_kg: existing.weight_per_unit_kg ?? 1,
+            seller_delivery_charge: existing.seller_delivery_charge ?? "",
           }
         : EMPTY);
     }
@@ -80,6 +83,8 @@ export default function ProductFormDialog({ cats, onSaved, existing = null, trig
         price: Number(form.price),
         moq: Number(form.moq),
         available_qty: Number(form.available_qty),
+        weight_per_unit_kg: Number(form.weight_per_unit_kg) || 1,
+        seller_delivery_charge: form.seller_delivery_charge === "" ? null : Number(form.seller_delivery_charge),
       };
       if (isEdit) {
         await api.put(`/products/${existing.product_id}`, payload);
@@ -162,6 +167,12 @@ export default function ProductFormDialog({ cats, onSaved, existing = null, trig
             <div><Label>Location</Label><Input data-testid="form-location" required value={form.location} onChange={(e) => set("location", e.target.value)} className="rounded-xl h-11 mt-1" /></div>
             <div><Label>State</Label><Input data-testid="form-state" required value={form.state} onChange={(e) => set("state", e.target.value)} className="rounded-xl h-11 mt-1" /></div>
             <div><Label>Harvest date</Label><Input data-testid="form-harvest" type="date" value={form.harvest_date} onChange={(e) => set("harvest_date", e.target.value)} className="rounded-xl h-11 mt-1" /></div>
+            <div><Label>Pincode (for delivery calc)</Label><Input data-testid="form-pincode" value={form.pincode} onChange={(e) => set("pincode", e.target.value)} className="rounded-xl h-11 mt-1" placeholder="e.g. 411001" /></div>
+            <div><Label>Weight per unit (kg)</Label><Input data-testid="form-weight" type="number" step="0.1" value={form.weight_per_unit_kg} onChange={(e) => set("weight_per_unit_kg", e.target.value)} className="rounded-xl h-11 mt-1" /></div>
+            <div>
+              <Label>Self-delivery charge (₹, optional)</Label>
+              <Input data-testid="form-seller-delivery" type="number" value={form.seller_delivery_charge} onChange={(e) => set("seller_delivery_charge", e.target.value)} className="rounded-xl h-11 mt-1" placeholder="Leave empty to not offer self-delivery" />
+            </div>
             <div className="flex flex-col gap-2 justify-end pb-1">
               <label className="flex items-center gap-2 cursor-pointer text-sm"><Checkbox data-testid="form-organic" checked={form.organic} onCheckedChange={(v) => set("organic", v)} /> Organic certified</label>
               <label className="flex items-center gap-2 cursor-pointer text-sm"><Checkbox data-testid="form-export" checked={form.export_ready} onCheckedChange={(v) => set("export_ready", v)} /> Export ready</label>
