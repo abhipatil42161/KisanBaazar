@@ -303,6 +303,16 @@ class ChangePasswordReq(BaseModel):
     logout_other_devices: bool = True
 
 
+class ChangeEmailRequestReq(BaseModel):
+    current_password: str
+    new_email: EmailStr
+
+
+class ChangeEmailVerifyReq(BaseModel):
+    otp_session: str
+    code: str
+
+
 class ForgotPasswordOtpReq(BaseModel):
     email: EmailStr
 
@@ -605,6 +615,47 @@ async def log_admin_activity(admin, action: str, *, target_type: Optional[str] =
     })
 
 
+async def compute_security_score() -> dict:
+    """A transparent, explainable score (0-100) derived from real recent
+    activity — not a black-box number. Starts at 100 and deducts for signals
+    seen in the last 7 days."""
+    now = datetime.now(timezone.utc)
+    week_ago_iso = (now - timedelta(days=7)).isoformat()
+
+    failed_logins_7d = await db.security_logs.count_documents({"event_type": "login_failed", "created_at": {"$gte": week_ago_iso}})
+    locked_events_7d = await db.security_logs.count_documents({"event_type": "account_locked", "created_at": {"$gte": week_ago_iso}})
+    suspicious_7d = await db.security_logs.count_documents({"event_type": "suspicious_login", "created_at": {"$gte": week_ago_iso}})
+    currently_locked = await db.login_attempts.count_documents({"locked_until": {"$gt": now}})
+    resets_7d = await db.security_logs.count_documents({"event_type": "password_reset_completed", "created_at": {"$gte": week_ago_iso}})
+
+    score = 100
+    score -= min(30, failed_logins_7d)          # up to -30 for repeated failed logins
+    score -= min(25, locked_events_7d * 5)       # -5 per lockout event, up to -25
+    score -= min(20, suspicious_7d * 10)         # -10 per suspicious event, up to -20
+    score -= min(10, currently_locked * 2)       # -2 per account locked right now, up to -10
+    score = max(0, score)
+
+    if score >= 90:
+        grade = "Excellent"
+    elif score >= 70:
+        grade = "Good"
+    elif score >= 50:
+        grade = "Fair"
+    else:
+        grade = "At Risk"
+
+    return {
+        "score": score,
+        "grade": grade,
+        "failed_logins_7d": failed_logins_7d,
+        "account_locked_events_7d": locked_events_7d,
+        "suspicious_activity_7d": suspicious_7d,
+        "currently_locked_accounts": currently_locked,
+        "password_resets_7d": resets_7d,
+        "computed_at": now_iso(),
+    }
+
+
 PASSWORD_CHANGED_EMAIL_HTML = """<p>Hi {name},</p>
 <p>Your KisanBaazar account password was just changed. If this was you, no action is needed.</p>
 <p>If you did <b>not</b> make this change, please reset your password immediately and contact support.</p>
@@ -722,22 +773,36 @@ MAINTENANCE_EXEMPT_PREFIXES = ("/api/auth", "/api/admin", "/api/maintenance-stat
 
 @app.middleware("http")
 async def maintenance_mode_middleware(request: Request, call_next):
-    """While maintenance mode is on, block write operations from anyone who
-    isn't an admin/super_admin. Reads (GET) and auth/admin endpoints always
-    pass through so admins can still sign in and manage the site."""
-    if request.method != "GET":
-        path = request.url.path
-        if not any(path.startswith(p) for p in MAINTENANCE_EXEMPT_PREFIXES):
-            m = await get_maintenance()
-            if m["enabled"]:
-                token = request.cookies.get(AUTH_COOKIE)
-                user_id = _user_id_from_jwt(token) if token else None
-                allowed = False
-                if user_id:
-                    u = await db.users.find_one({"user_id": user_id}, {"_id": 0, "role": 1})
-                    allowed = bool(u and is_admin_role(u.get("role", "")))
-                if not allowed:
-                    return JSONResponse(status_code=503, content={"detail": m["message"]})
+    """Two tiers:
+    - Regular maintenance: blocks WRITE operations for non-admins; reads and
+      admin/auth endpoints still work so people can browse and admins can manage the site.
+    - Emergency shutdown: blocks EVERYTHING (including reads) for everyone except super_admin.
+    """
+    path = request.url.path
+    exempt = any(path.startswith(p) for p in MAINTENANCE_EXEMPT_PREFIXES)
+    if exempt and request.method == "GET":
+        return await call_next(request)
+
+    m = await get_maintenance()
+    if not m["enabled"]:
+        return await call_next(request)
+
+    token = request.cookies.get(AUTH_COOKIE)
+    user_id = _user_id_from_jwt(token) if token else None
+    role = None
+    if user_id:
+        u = await db.users.find_one({"user_id": user_id}, {"_id": 0, "role": 1})
+        role = u.get("role") if u else None
+
+    if m.get("emergency"):
+        if role == "super_admin" or exempt:
+            return await call_next(request)
+        return JSONResponse(status_code=503, content={"detail": m["message"], "emergency": True})
+
+    # Regular maintenance: GETs and exempt prefixes already passed above; only writes are gated here.
+    if request.method != "GET" and not exempt:
+        if not is_admin_role(role or ""):
+            return JSONResponse(status_code=503, content={"detail": m["message"]})
     return await call_next(request)
 
 
@@ -854,7 +919,10 @@ class SiteContentUpdateReq(BaseModel):
 
 # ------------------ Maintenance Mode ------------------
 MAINTENANCE_DOC_ID = "maintenance"
-DEFAULT_MAINTENANCE = {"maintenance_id": MAINTENANCE_DOC_ID, "enabled": False, "message": "We'll be back shortly — KisanBaazar is undergoing scheduled maintenance."}
+DEFAULT_MAINTENANCE = {
+    "maintenance_id": MAINTENANCE_DOC_ID, "enabled": False, "emergency": False,
+    "message": "We'll be back shortly — KisanBaazar is undergoing scheduled maintenance.",
+}
 
 
 async def get_maintenance() -> dict:
@@ -867,6 +935,7 @@ async def get_maintenance() -> dict:
 class MaintenanceUpdateReq(BaseModel):
     enabled: bool
     message: Optional[str] = None
+    emergency: bool = False
 
 
 # ------------------ Hybrid Delivery System ------------------
@@ -1154,6 +1223,22 @@ async def login(req: LoginReq, request: Request, response: Response):
         raise HTTPException(401, "Invalid credentials")
 
     await clear_attempts(identifier)
+
+    # New-IP detection: flag + email the user if this IP hasn't been seen for this account before.
+    ip = get_client_ip(request)
+    if ip:
+        seen_before = await db.security_logs.find_one({"user_id": user["user_id"], "event_type": "login_success", "ip": ip})
+        has_prior_logins = await db.security_logs.find_one({"user_id": user["user_id"], "event_type": "login_success"})
+        if has_prior_logins and not seen_before:
+            await log_security_event("suspicious_login", user_id=user["user_id"], email=email, ip=ip, detail="New IP address")
+            await send_email(
+                to=email, subject="New sign-in to your KisanBaazar account",
+                html=f"<p>Hi {user.get('name', '')},</p><p>Your account was just accessed from a new IP address "
+                     f"({ip}). If this was you, no action is needed. If not, please change your password immediately.</p>"
+                     f"<p>— KisanBaazar Security</p>",
+            )
+        await log_security_event("login_success", user_id=user["user_id"], email=email, ip=ip)
+
     token = make_jwt(user["user_id"], user.get("pw_version", 0))
     csrf = _set_auth_cookies(response, token)
     return {"user": public_user(user), "csrf_token": csrf}
@@ -1366,6 +1451,57 @@ async def change_password(req: ChangePasswordReq, request: Request, response: Re
         token = make_jwt(user.user_id, new_pwv)
         _set_auth_cookies(response, token)
     return {"ok": True, "message": "Password changed successfully."}
+
+
+@api.post("/auth/change-email/request")
+async def change_email_request(req: ChangeEmailRequestReq, user: User = Depends(get_current_user)):
+    """Step 1: verify the current password, then send a verification code to
+    the NEW email address — proves ownership before anything changes. This
+    is what makes an account (including super_admin) safe from a silent
+    email swap: nobody can complete this without access to the new inbox."""
+    doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    if not doc or "password" not in doc or not verify_pw(req.current_password, doc["password"]):
+        raise HTTPException(400, "Current password is incorrect")
+    new_email = req.new_email.lower()
+    if new_email == doc["email"].lower():
+        raise HTTPException(400, "That's already your current email")
+    if await db.users.find_one({"email": new_email}, {"_id": 0, "user_id": 1}):
+        raise HTTPException(409, "That email is already in use")
+    session_id, code = await otp_service.create(
+        db, purpose="change-email", email=new_email, payload={"user_id": user.user_id, "new_email": new_email},
+    )
+    await send_email(
+        to=new_email, subject="Verify your new KisanBaazar email",
+        html=f"<p>Your verification code is:</p><h2 style='letter-spacing:4px'>{code}</h2><p>This code expires in 10 minutes.</p>",
+        text=f"Your verification code: {code} (expires in 10 minutes)",
+    )
+    return {"ok": True, "otp_session": session_id, "message": "A verification code was sent to your new email."}
+
+
+@api.post("/auth/change-email/verify")
+async def change_email_verify(req: ChangeEmailVerifyReq, request: Request, user: User = Depends(get_current_user)):
+    try:
+        payload = await otp_service.verify(db, session_id=req.otp_session, code=req.code)
+    except ValueError as e:
+        msg = str(e)
+        if msg == "session_not_found":
+            raise HTTPException(404, ERR["session_gone"])
+        if msg == "expired":
+            raise HTTPException(410, ERR["otp_expired"])
+        if msg == "too_many_attempts":
+            raise HTTPException(429, ERR["otp_max"])
+        raise HTTPException(400, ERR["otp_invalid"])
+
+    if payload.get("user_id") != user.user_id:
+        raise HTTPException(403, "This verification code doesn't belong to your account")
+    new_email = payload["new_email"]
+    old_email = user.email
+    await db.users.update_one({"user_id": user.user_id}, {"$set": {"email": new_email}})
+    await send_email(to=old_email, subject="Your KisanBaazar email was changed",
+                      html=f"<p>Your account email was changed to {new_email}. If this wasn't you, contact support immediately.</p>")
+    await log_security_event("email_changed", user_id=user.user_id, email=new_email, ip=get_client_ip(request), detail=f"from {old_email}")
+    await log_admin_activity(user, "email_changed", target_type="user", target_id=user.user_id, detail=f"{old_email} -> {new_email}") if is_admin_role(user.role) else None
+    return {"ok": True, "message": "Email updated successfully."}
 
 
 @api.post("/auth/google/session")
@@ -1879,7 +2015,7 @@ async def admin_update_site_content(req: SiteContentUpdateReq, user: User = Depe
 @api.get("/maintenance-status")
 async def public_maintenance_status():
     m = await get_maintenance()
-    return {"enabled": m["enabled"], "message": m["message"]}
+    return {"enabled": m["enabled"], "message": m["message"], "emergency": m["emergency"]}
 
 
 @api.get("/admin/maintenance")
@@ -1891,11 +2027,13 @@ async def admin_get_maintenance(user: User = Depends(get_current_user)):
 @api.put("/admin/maintenance")
 async def admin_update_maintenance(req: MaintenanceUpdateReq, user: User = Depends(get_current_user)):
     require_super_admin(user)
-    updates = {"enabled": req.enabled}
+    updates = {"enabled": req.enabled, "emergency": req.emergency}
     if req.message is not None:
         updates["message"] = req.message
     await db.maintenance.update_one({"maintenance_id": MAINTENANCE_DOC_ID}, {"$set": updates}, upsert=True)
     await log_admin_activity(user, "maintenance_mode_toggled", target_type="maintenance", detail=str(updates))
+    await log_security_event("emergency_shutdown" if req.emergency and req.enabled else "maintenance_toggled",
+                              user_id=user.user_id, email=user.email)
     return await get_maintenance()
 
 
@@ -2465,6 +2603,8 @@ async def admin_update_user(uid: str, req: AdminUserUpdateReq, user: User = Depe
     target = await db.users.find_one({"user_id": uid}, {"_id": 0, "password": 0})
     if not target:
         raise HTTPException(404, "User not found")
+    if target.get("role") == "super_admin" and uid != user.user_id:
+        raise HTTPException(403, "Super Admin accounts can only be modified by themselves")
     if user.role != "super_admin":
         if is_admin_role(target.get("role", "")):
             raise HTTPException(403, "Only Super Admin can modify an admin account")
@@ -2488,11 +2628,29 @@ async def admin_delete_user(uid: str, user: User = Depends(get_current_user)):
     target = await db.users.find_one({"user_id": uid}, {"_id": 0})
     if not target:
         raise HTTPException(404, "User not found")
+    if target.get("role") == "super_admin":
+        raise HTTPException(403, "Super Admin accounts cannot be deleted")
     if user.role != "super_admin" and is_admin_role(target.get("role", "")):
         raise HTTPException(403, "Only Super Admin can delete an admin account")
     await db.users.delete_one({"user_id": uid})
     await log_admin_activity(user, "user_deleted", target_type="user", target_id=uid, detail=target.get("email"))
     return {"ok": True}
+
+
+@api.post("/admin/users/{uid}/force-logout")
+async def admin_force_logout(uid: str, user: User = Depends(get_current_user)):
+    """Immediately invalidates every session/JWT the target user currently holds."""
+    if not is_admin_role(user.role):
+        raise HTTPException(403, "Admin only")
+    target = await db.users.find_one({"user_id": uid}, {"_id": 0})
+    if not target:
+        raise HTTPException(404, "User not found")
+    if target.get("role") == "super_admin" and uid != user.user_id:
+        raise HTTPException(403, "Super Admin accounts can only force-logout themselves")
+    await db.users.update_one({"user_id": uid}, {"$inc": {"pw_version": 1}})
+    await log_admin_activity(user, "force_logout", target_type="user", target_id=uid)
+    await log_security_event("force_logout", user_id=uid, email=target.get("email"))
+    return {"ok": True, "message": "All active sessions for this user have been logged out."}
 
 
 # ------------------ Admin: Products ------------------
@@ -2583,6 +2741,12 @@ async def admin_update_settings(req: AdminSettingsUpdateReq, user: User = Depend
 
 
 # ------------------ Admin: Security ------------------
+@api.get("/admin/security-score")
+async def admin_security_score(user: User = Depends(get_current_user)):
+    require_super_admin(user)
+    return await compute_security_score()
+
+
 @api.get("/admin/security-logs")
 async def admin_security_logs(
     event_type: Optional[str] = None, email: Optional[str] = None, limit: int = 200,
