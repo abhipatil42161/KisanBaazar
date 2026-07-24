@@ -1002,7 +1002,7 @@ DEFAULT_SITE_CONTENT = {
     "content_id": SITE_CONTENT_DOC_ID,
     "site_name": "KisanBaazar",
     "site_description": "Connecting India's farmers directly to the world. Transparent. Trusted. Trade.",
-    "logo_url": None,
+    "logo_url": "/logo.png",
     "contact_email": "hello@kisanbaazar.in",
     "contact_phone": "1800-KISAN-00",
     "contact_address": "Pune, Maharashtra",
