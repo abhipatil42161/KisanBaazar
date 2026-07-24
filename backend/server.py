@@ -9,6 +9,7 @@ import re
 import logging
 import uuid
 import secrets
+import pyotp
 import bcrypt
 import jwt as pyjwt
 import httpx
@@ -313,6 +314,20 @@ class ChangeEmailVerifyReq(BaseModel):
     code: str
 
 
+class TwoFAVerifySetupReq(BaseModel):
+    code: str
+
+
+class TwoFADisableReq(BaseModel):
+    password: str
+    code: str
+
+
+class TwoFALoginVerifyReq(BaseModel):
+    temp_token: str
+    code: str
+
+
 class ForgotPasswordOtpReq(BaseModel):
     email: EmailStr
 
@@ -519,9 +534,26 @@ def make_jwt(user_id: str, pw_version: int = 0) -> str:
     return pyjwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 
+def make_2fa_pending_token(user_id: str) -> str:
+    """Short-lived token identifying a login that passed password-check but
+    still needs a TOTP code. Deliberately uses a different claim key
+    ('pending_2fa_user_id') so it can never be accepted by get_current_user."""
+    payload = {"pending_2fa_user_id": user_id, "exp": datetime.now(timezone.utc) + timedelta(minutes=5)}
+    return pyjwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+
+def read_2fa_pending_token(token: str) -> Optional[str]:
+    try:
+        payload = pyjwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return payload.get("pending_2fa_user_id")
+    except Exception:
+        return None
+
+
 def public_user(doc: dict) -> dict:
-    """Strip private fields (password, _id) from a user document."""
-    return {k: v for k, v in doc.items() if k not in ("password", "_id")}
+    """Strip private fields (password, _id, 2FA secrets) from a user document."""
+    hidden = ("password", "_id", "totp_secret", "totp_pending_secret", "totp_backup_codes")
+    return {k: v for k, v in doc.items() if k not in hidden}
 
 
 def get_client_ip(request: Request) -> str:
@@ -530,6 +562,43 @@ def get_client_ip(request: Request) -> str:
     if fwd:
         return fwd.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
+
+
+def parse_user_agent(ua: str) -> tuple:
+    """Lightweight UA parsing — no extra dependency needed for a readable
+    device/browser label in logs."""
+    ua = ua or ""
+    if "Android" in ua:
+        device = "Android"
+    elif "iPhone" in ua or "iPad" in ua:
+        device = "iOS"
+    elif "Windows" in ua:
+        device = "Windows"
+    elif "Macintosh" in ua or "Mac OS" in ua:
+        device = "Mac"
+    elif "Linux" in ua:
+        device = "Linux"
+    else:
+        device = "Unknown"
+
+    if "Edg/" in ua:
+        browser = "Edge"
+    elif "OPR/" in ua or "Opera" in ua:
+        browser = "Opera"
+    elif "Chrome/" in ua and "Chromium" not in ua:
+        browser = "Chrome"
+    elif "Firefox/" in ua:
+        browser = "Firefox"
+    elif "Safari/" in ua and "Chrome/" not in ua:
+        browser = "Safari"
+    else:
+        browser = "Unknown"
+    return device, browser
+
+
+def get_client_context(request: Request) -> dict:
+    device, browser = parse_user_agent(request.headers.get("User-Agent", ""))
+    return {"ip": get_client_ip(request), "device": device, "browser": browser}
 
 
 # ------------------ Brute-force lockout helpers ------------------
@@ -600,8 +669,10 @@ async def log_security_event(event_type: str, *, user_id: Optional[str] = None, 
 
 
 async def log_admin_activity(admin, action: str, *, target_type: Optional[str] = None,
-                              target_id: Optional[str] = None, detail: Optional[str] = None) -> None:
+                              target_id: Optional[str] = None, detail: Optional[str] = None,
+                              request: Optional[Request] = None, status: str = "success") -> None:
     """Every Super Admin / Admin mutation gets recorded here for accountability."""
+    ctx = get_client_context(request) if request is not None else {"ip": None, "device": None, "browser": None}
     await db.admin_activity_logs.insert_one({
         "log_id": f"actlog_{uuid.uuid4().hex[:12]}",
         "admin_id": admin.user_id,
@@ -611,6 +682,10 @@ async def log_admin_activity(admin, action: str, *, target_type: Optional[str] =
         "target_type": target_type,
         "target_id": target_id,
         "detail": detail,
+        "status": status,
+        "ip": ctx["ip"],
+        "device": ctx["device"],
+        "browser": ctx["browser"],
         "created_at": now_iso(),
     })
 
@@ -671,6 +746,53 @@ RESET_COMPLETED_EMAIL_HTML = """<p>Hi {name},</p>
 <p>Your KisanBaazar password was successfully reset. You've been logged out of all other devices for security.</p>
 <p>If you did not do this, please contact support immediately.</p>
 <p>— KisanBaazar Security</p>"""
+
+# ------------------ Email / SMS Templates (Super Admin editable) ------------------
+DEFAULT_EMAIL_TEMPLATES = {
+    "password_changed": {
+        "subject": "Your KisanBaazar password was changed",
+        "html": PASSWORD_CHANGED_EMAIL_HTML.replace("{name}", "{{name}}"),
+        "variables": ["name"],
+    },
+    "password_reset_requested": {
+        "subject": "Reset your KisanBaazar password",
+        "html": RESET_REQUESTED_EMAIL_HTML.replace("{link}", "{{link}}"),
+        "variables": ["link"],
+    },
+    "password_reset_completed": {
+        "subject": "Your KisanBaazar password was reset",
+        "html": RESET_COMPLETED_EMAIL_HTML.replace("{name}", "{{name}}"),
+        "variables": ["name"],
+    },
+    "order_confirmation": {
+        "subject": "Your KisanBaazar order {{order_id}} is confirmed",
+        "html": "<p>Hi {{name}},</p><p>Your order <b>{{order_id}}</b> for ₹{{amount}} has been placed successfully.</p><p>Thank you for shopping with KisanBaazar!</p>",
+        "variables": ["name", "order_id", "amount"],
+    },
+}
+
+DEFAULT_SMS_TEMPLATES = {
+    "otp_verification": {"text": "Your KisanBaazar OTP is {{code}}. Valid for 10 minutes. Do not share this with anyone.", "variables": ["code"]},
+    "order_confirmation": {"text": "KisanBaazar: Order {{order_id}} confirmed. Total Rs.{{amount}}. Track it in the app.", "variables": ["order_id", "amount"]},
+    "delivery_otp": {"text": "Your KisanBaazar delivery OTP is {{otp}}. Share this only with the delivery partner.", "variables": ["otp"]},
+}
+
+
+def _render_template(text: str, **variables) -> str:
+    for k, v in variables.items():
+        text = text.replace("{{" + k + "}}", str(v))
+    return text
+
+
+async def get_email_template(key: str, **variables) -> tuple:
+    """Returns (subject, html) — pulls the Super-Admin-edited version if one
+    exists, otherwise falls back to the built-in default. Both are rendered
+    with {{variable}} substitution."""
+    default = DEFAULT_EMAIL_TEMPLATES[key]
+    doc = await db.email_templates.find_one({"key": key}, {"_id": 0})
+    subject = doc["subject"] if doc else default["subject"]
+    html = doc["html"] if doc else default["html"]
+    return _render_template(subject, **variables), _render_template(html, **variables)
 
 
 def _user_id_from_jwt(token: str) -> Optional[str]:
@@ -936,6 +1058,27 @@ class MaintenanceUpdateReq(BaseModel):
     enabled: bool
     message: Optional[str] = None
     emergency: bool = False
+
+
+# ------------------ Dynamic Pages (About/Privacy/Terms/Refund/Shipping, etc.) ------------------
+class PageReq(BaseModel):
+    slug: str
+    title: str
+    content: str  # HTML
+
+
+DEFAULT_PAGES = [
+    {"slug": "about-us", "title": "About Us",
+     "content": "<h2>About KisanBaazar</h2><p>KisanBaazar connects Indian farmers directly with buyers, retailers, wholesalers, and exporters — cutting out middlemen and ensuring fair prices for everyone.</p>"},
+    {"slug": "privacy-policy", "title": "Privacy Policy",
+     "content": "<h2>Privacy Policy</h2><p>We collect only the information needed to operate the marketplace — account details, order history, and payment records. We never sell your data to third parties.</p>"},
+    {"slug": "terms-conditions", "title": "Terms & Conditions",
+     "content": "<h2>Terms & Conditions</h2><p>By using KisanBaazar, you agree to trade honestly, provide accurate product information, and comply with applicable Indian agricultural trade laws.</p>"},
+    {"slug": "refund-policy", "title": "Refund Policy",
+     "content": "<h2>Refund Policy</h2><p>Refunds are processed for cancelled or undelivered orders within 5-7 business days to the original payment method.</p>"},
+    {"slug": "shipping-policy", "title": "Shipping Policy",
+     "content": "<h2>Shipping Policy</h2><p>Delivery timelines depend on the method chosen at checkout — pickup, local delivery, courier, or transport — and are shown before you pay.</p>"},
+]
 
 
 # ------------------ Hybrid Delivery System ------------------
@@ -1239,8 +1382,41 @@ async def login(req: LoginReq, request: Request, response: Response):
             )
         await log_security_event("login_success", user_id=user["user_id"], email=email, ip=ip)
 
+    if user.get("totp_enabled"):
+        # Password is correct, but a second factor is required before we issue
+        # a real session — return a short-lived pending token instead.
+        return {"requires_2fa": True, "temp_token": make_2fa_pending_token(user["user_id"])}
+
     token = make_jwt(user["user_id"], user.get("pw_version", 0))
     csrf = _set_auth_cookies(response, token)
+    return {"user": public_user(user), "csrf_token": csrf}
+
+
+@api.post("/auth/2fa/login-verify")
+async def two_fa_login_verify(req: TwoFALoginVerifyReq, response: Response):
+    user_id = read_2fa_pending_token(req.temp_token)
+    if not user_id:
+        raise HTTPException(401, "This login has expired — please sign in again")
+    user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    if not user or not user.get("totp_enabled"):
+        raise HTTPException(400, "2FA is not active on this account")
+
+    code = req.code.strip().replace(" ", "")
+    ok = pyotp.TOTP(user["totp_secret"]).verify(code, valid_window=1)
+    if not ok:
+        # Fall back to a backup code (single-use, hashed).
+        for i, hashed in enumerate(user.get("totp_backup_codes", [])):
+            if verify_pw(code, hashed):
+                remaining = user["totp_backup_codes"][:i] + user["totp_backup_codes"][i + 1:]
+                await db.users.update_one({"user_id": user_id}, {"$set": {"totp_backup_codes": remaining}})
+                ok = True
+                break
+    if not ok:
+        raise HTTPException(400, "Invalid authentication code")
+
+    token = make_jwt(user_id, user.get("pw_version", 0))
+    csrf = _set_auth_cookies(response, token)
+    await log_security_event("login_success", user_id=user_id, email=user["email"], detail="via 2FA")
     return {"user": public_user(user), "csrf_token": csrf}
 
 
@@ -1310,9 +1486,9 @@ async def forgot_password(req: ForgotPasswordReq, request: Request):
             "created_at": now_iso(),
         })
         reset_link = f"{FRONTEND_URL.rstrip('/')}/reset-password?token={token}"
+        subject, html = await get_email_template("password_reset_requested", link=reset_link)
         await send_email(
-            to=email, subject="Reset your KisanBaazar password",
-            html=RESET_REQUESTED_EMAIL_HTML.format(link=reset_link),
+            to=email, subject=subject, html=html,
             text=f"Reset your password: {reset_link} (expires in 15 minutes)",
         )
         await log_security_event("password_reset_requested", user_id=user["user_id"], email=email, ip=ip)
@@ -1347,10 +1523,8 @@ async def reset_password(req: ResetPasswordReq, request: Request):
         {"user_id": rec["user_id"], "used": False}, {"$set": {"used": True, "used_at": now_iso()}},
     )
     await clear_attempts_for_email(rec["email"])
-    await send_email(
-        to=rec["email"], subject="Your KisanBaazar password was reset",
-        html=RESET_COMPLETED_EMAIL_HTML.format(name=user.get("name", "")),
-    )
+    subject, html = await get_email_template("password_reset_completed", name=user.get("name", ""))
+    await send_email(to=rec["email"], subject=subject, html=html)
     await log_security_event("password_reset_completed", user_id=rec["user_id"], email=rec["email"], ip=get_client_ip(request))
     return {"ok": True, "message": "Password updated. You can now log in."}
 
@@ -1407,10 +1581,8 @@ async def reset_password_otp_verify(req: ResetPasswordOtpVerifyReq, request: Req
         },
     )
     await clear_attempts_for_email(user["email"])
-    await send_email(
-        to=user["email"], subject="Your KisanBaazar password was reset",
-        html=RESET_COMPLETED_EMAIL_HTML.format(name=user.get("name", "")),
-    )
+    subject, html = await get_email_template("password_reset_completed", name=user.get("name", ""))
+    await send_email(to=user["email"], subject=subject, html=html)
     await log_security_event("password_reset_completed", user_id=user_id, email=user["email"], ip=get_client_ip(request))
     return {"ok": True, "message": "Password updated. You can now log in."}
 
@@ -1440,10 +1612,8 @@ async def change_password(req: ChangePasswordReq, request: Request, response: Re
             "$push": {"password_history": {"$each": [doc["password"]], "$slice": -PASSWORD_HISTORY_LIMIT}},
         },
     )
-    await send_email(
-        to=doc["email"], subject="Your KisanBaazar password was changed",
-        html=PASSWORD_CHANGED_EMAIL_HTML.format(name=doc.get("name", "")),
-    )
+    subject, html = await get_email_template("password_changed", name=doc.get("name", ""))
+    await send_email(to=doc["email"], subject=subject, html=html)
     await log_security_event("password_changed", user_id=user.user_id, email=doc["email"], ip=get_client_ip(request))
 
     if req.logout_other_devices:
@@ -1500,8 +1670,71 @@ async def change_email_verify(req: ChangeEmailVerifyReq, request: Request, user:
     await send_email(to=old_email, subject="Your KisanBaazar email was changed",
                       html=f"<p>Your account email was changed to {new_email}. If this wasn't you, contact support immediately.</p>")
     await log_security_event("email_changed", user_id=user.user_id, email=new_email, ip=get_client_ip(request), detail=f"from {old_email}")
-    await log_admin_activity(user, "email_changed", target_type="user", target_id=user.user_id, detail=f"{old_email} -> {new_email}") if is_admin_role(user.role) else None
+    await log_admin_activity(user, "email_changed", target_type="user", target_id=user.user_id, detail=f"{old_email} -> {new_email}", request=request) if is_admin_role(user.role) else None
     return {"ok": True, "message": "Email updated successfully."}
+
+
+# ------------------ Two-Factor Authentication (TOTP) ------------------
+@api.get("/auth/2fa/status")
+async def two_fa_status(user: User = Depends(get_current_user)):
+    doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0, "totp_enabled": 1})
+    return {"enabled": bool(doc and doc.get("totp_enabled"))}
+
+
+@api.post("/auth/2fa/setup")
+async def two_fa_setup(user: User = Depends(get_current_user)):
+    """Step 1: generate a pending TOTP secret + QR-ready otpauth:// URI.
+    Not active until confirmed via /auth/2fa/verify-setup."""
+    secret = pyotp.random_base32()
+    await db.users.update_one({"user_id": user.user_id}, {"$set": {"totp_pending_secret": secret}})
+    otpauth_url = pyotp.TOTP(secret).provisioning_uri(name=user.email, issuer_name="KisanBaazar")
+    return {"secret": secret, "otpauth_url": otpauth_url}
+
+
+@api.post("/auth/2fa/verify-setup")
+async def two_fa_verify_setup(req: TwoFAVerifySetupReq, user: User = Depends(get_current_user)):
+    doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    pending = doc.get("totp_pending_secret") if doc else None
+    if not pending:
+        raise HTTPException(400, "Start setup first via /auth/2fa/setup")
+    if not pyotp.TOTP(pending).verify(req.code.strip(), valid_window=1):
+        raise HTTPException(400, "Invalid code — check your authenticator app and try again")
+
+    backup_codes = [secrets.token_hex(4) for _ in range(8)]
+    hashed_codes = [hash_pw(c) for c in backup_codes]
+    await db.users.update_one(
+        {"user_id": user.user_id},
+        {"$set": {"totp_secret": pending, "totp_enabled": True, "totp_backup_codes": hashed_codes},
+         "$unset": {"totp_pending_secret": ""}},
+    )
+    await send_email(to=user.email, subject="Two-Factor Authentication enabled",
+                      html="<p>2FA has just been enabled on your KisanBaazar account. Keep your backup codes somewhere safe.</p>")
+    await log_security_event("2fa_enabled", user_id=user.user_id, email=user.email)
+    return {"ok": True, "backup_codes": backup_codes, "message": "2FA enabled. Save these backup codes — they won't be shown again."}
+
+
+@api.post("/auth/2fa/disable")
+async def two_fa_disable(req: TwoFADisableReq, user: User = Depends(get_current_user)):
+    doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    if not doc or "password" not in doc or not verify_pw(req.password, doc["password"]):
+        raise HTTPException(400, "Current password is incorrect")
+    code = req.code.strip().replace(" ", "")
+    ok = doc.get("totp_secret") and pyotp.TOTP(doc["totp_secret"]).verify(code, valid_window=1)
+    if not ok:
+        for hashed in doc.get("totp_backup_codes", []):
+            if verify_pw(code, hashed):
+                ok = True
+                break
+    if not ok:
+        raise HTTPException(400, "Invalid authentication code")
+    await db.users.update_one(
+        {"user_id": user.user_id},
+        {"$set": {"totp_enabled": False}, "$unset": {"totp_secret": "", "totp_backup_codes": "", "totp_pending_secret": ""}},
+    )
+    await send_email(to=user.email, subject="Two-Factor Authentication disabled",
+                      html="<p>2FA has been turned off on your KisanBaazar account. If you didn't do this, secure your account immediately.</p>")
+    await log_security_event("2fa_disabled", user_id=user.user_id, email=user.email)
+    return {"ok": True, "message": "2FA disabled."}
 
 
 @api.post("/auth/google/session")
@@ -1917,7 +2150,7 @@ async def get_delivery_for_order(order_id: str, user: User = Depends(get_current
 
 
 @api.patch("/delivery/{did}/assign")
-async def assign_delivery(did: str, req: DeliveryAssignReq, user: User = Depends(get_current_user)):
+async def assign_delivery(did: str, req: DeliveryAssignReq, request: Request, user: User = Depends(get_current_user)):
     d = await db.deliveries.find_one({"delivery_id": did}, {"_id": 0})
     if not d:
         raise HTTPException(404, "Delivery not found")
@@ -1932,7 +2165,7 @@ async def assign_delivery(did: str, req: DeliveryAssignReq, user: User = Depends
          "$push": {"tracking_history": {"status": "assigned", "at": now_iso(), "note": f"Assigned to {partner['name']}"}}},
     )
     if is_admin_role(user.role):
-        await log_admin_activity(user, "delivery_assigned", target_type="delivery", target_id=did, detail=partner["name"])
+        await log_admin_activity(user, "delivery_assigned", target_type="delivery", target_id=did, detail=partner["name"], request=request)
     return await db.deliveries.find_one({"delivery_id": did}, {"_id": 0})
 
 
@@ -2001,13 +2234,13 @@ async def admin_get_site_content(user: User = Depends(get_current_user)):
 
 
 @api.put("/admin/site-content")
-async def admin_update_site_content(req: SiteContentUpdateReq, user: User = Depends(get_current_user)):
+async def admin_update_site_content(req: SiteContentUpdateReq, request: Request, user: User = Depends(get_current_user)):
     require_super_admin(user)
     updates = {k: v for k, v in req.model_dump(exclude_none=True).items()}
     if not updates:
         raise HTTPException(400, "Nothing to update")
     await db.site_content.update_one({"content_id": SITE_CONTENT_DOC_ID}, {"$set": updates}, upsert=True)
-    await log_admin_activity(user, "site_content_updated", target_type="site_content", detail=str(list(updates.keys())))
+    await log_admin_activity(user, "site_content_updated", target_type="site_content", detail=str(list(updates.keys())), request=request)
     return await get_site_content()
 
 
@@ -2025,16 +2258,114 @@ async def admin_get_maintenance(user: User = Depends(get_current_user)):
 
 
 @api.put("/admin/maintenance")
-async def admin_update_maintenance(req: MaintenanceUpdateReq, user: User = Depends(get_current_user)):
+async def admin_update_maintenance(req: MaintenanceUpdateReq, request: Request, user: User = Depends(get_current_user)):
     require_super_admin(user)
     updates = {"enabled": req.enabled, "emergency": req.emergency}
     if req.message is not None:
         updates["message"] = req.message
     await db.maintenance.update_one({"maintenance_id": MAINTENANCE_DOC_ID}, {"$set": updates}, upsert=True)
-    await log_admin_activity(user, "maintenance_mode_toggled", target_type="maintenance", detail=str(updates))
+    await log_admin_activity(user, "maintenance_mode_toggled", target_type="maintenance", detail=str(updates), request=request)
     await log_security_event("emergency_shutdown" if req.emergency and req.enabled else "maintenance_toggled",
                               user_id=user.user_id, email=user.email)
     return await get_maintenance()
+
+
+# ------------------ Admin: Email / SMS Templates ------------------
+class EmailTemplateUpdateReq(BaseModel):
+    subject: str
+    html: str
+
+
+class SmsTemplateUpdateReq(BaseModel):
+    text: str
+
+
+@api.get("/admin/email-templates")
+async def admin_list_email_templates(user: User = Depends(get_current_user)):
+    require_super_admin(user)
+    saved = {d["key"]: d async for d in db.email_templates.find({}, {"_id": 0})}
+    return [
+        {"key": k, "variables": v["variables"], **{kk: vv for kk, vv in (saved.get(k) or v).items() if kk in ("subject", "html")}}
+        for k, v in DEFAULT_EMAIL_TEMPLATES.items()
+    ]
+
+
+@api.put("/admin/email-templates/{key}")
+async def admin_update_email_template(key: str, req: EmailTemplateUpdateReq, request: Request, user: User = Depends(get_current_user)):
+    require_super_admin(user)
+    if key not in DEFAULT_EMAIL_TEMPLATES:
+        raise HTTPException(404, "Unknown template key")
+    await db.email_templates.update_one(
+        {"key": key},
+        {"$set": {"key": key, "subject": req.subject, "html": req.html, "variables": DEFAULT_EMAIL_TEMPLATES[key]["variables"], "updated_at": now_iso()}},
+        upsert=True,
+    )
+    await log_admin_activity(user, "email_template_updated", target_type="email_template", target_id=key, request=request)
+    return {"ok": True}
+
+
+@api.get("/admin/sms-templates")
+async def admin_list_sms_templates(user: User = Depends(get_current_user)):
+    require_super_admin(user)
+    saved = {d["key"]: d async for d in db.sms_templates.find({}, {"_id": 0})}
+    return [
+        {"key": k, "variables": v["variables"], "text": (saved.get(k) or v)["text"]}
+        for k, v in DEFAULT_SMS_TEMPLATES.items()
+    ]
+
+
+@api.put("/admin/sms-templates/{key}")
+async def admin_update_sms_template(key: str, req: SmsTemplateUpdateReq, request: Request, user: User = Depends(get_current_user)):
+    require_super_admin(user)
+    if key not in DEFAULT_SMS_TEMPLATES:
+        raise HTTPException(404, "Unknown template key")
+    await db.sms_templates.update_one(
+        {"key": key},
+        {"$set": {"key": key, "text": req.text, "variables": DEFAULT_SMS_TEMPLATES[key]["variables"], "updated_at": now_iso()}},
+        upsert=True,
+    )
+    await log_admin_activity(user, "sms_template_updated", target_type="sms_template", target_id=key, request=request)
+    return {"ok": True}
+
+
+# ------------------ Dynamic Pages (public + Super Admin) ------------------
+@api.get("/pages")
+async def public_list_pages():
+    docs = await db.pages.find({}, {"_id": 0, "slug": 1, "title": 1}).to_list(50)
+    return docs
+
+
+@api.get("/pages/{slug}")
+async def public_get_page(slug: str):
+    doc = await db.pages.find_one({"slug": slug}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Page not found")
+    return doc
+
+
+@api.get("/admin/pages")
+async def admin_list_pages(user: User = Depends(get_current_user)):
+    require_super_admin(user)
+    return await db.pages.find({}, {"_id": 0}).to_list(100)
+
+
+@api.put("/admin/pages/{slug}")
+async def admin_upsert_page(slug: str, req: PageReq, request: Request, user: User = Depends(get_current_user)):
+    require_super_admin(user)
+    doc = {"slug": slug, "title": req.title, "content": req.content, "updated_at": now_iso()}
+    await db.pages.update_one({"slug": slug}, {"$set": doc}, upsert=True)
+    await log_admin_activity(user, "page_updated", target_type="page", target_id=slug, request=request)
+    return doc
+
+
+@api.delete("/admin/pages/{slug}")
+async def admin_delete_page(slug: str, request: Request, user: User = Depends(get_current_user)):
+    require_super_admin(user)
+    result = await db.pages.delete_one({"slug": slug})
+    if result.deleted_count == 0:
+        raise HTTPException(404, "Page not found")
+    await log_admin_activity(user, "page_deleted", target_type="page", target_id=slug, request=request)
+    return {"ok": True}
 
 
 # ------------------ Admin Activity Logs ------------------
@@ -2595,7 +2926,7 @@ async def admin_list_users(
 
 
 @api.patch("/admin/users/{uid}")
-async def admin_update_user(uid: str, req: AdminUserUpdateReq, user: User = Depends(get_current_user)):
+async def admin_update_user(uid: str, req: AdminUserUpdateReq, request: Request, user: User = Depends(get_current_user)):
     if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     if uid == user.user_id and (req.banned or req.role not in (None, "admin", "super_admin")):
@@ -2615,12 +2946,12 @@ async def admin_update_user(uid: str, req: AdminUserUpdateReq, user: User = Depe
         raise HTTPException(400, "Nothing to update")
     await db.users.update_one({"user_id": uid}, {"$set": updates})
     doc = await db.users.find_one({"user_id": uid}, {"_id": 0, "password": 0})
-    await log_admin_activity(user, "user_updated", target_type="user", target_id=uid, detail=str(updates))
+    await log_admin_activity(user, "user_updated", target_type="user", target_id=uid, detail=str(updates), request=request)
     return doc
 
 
 @api.delete("/admin/users/{uid}")
-async def admin_delete_user(uid: str, user: User = Depends(get_current_user)):
+async def admin_delete_user(uid: str, request: Request, user: User = Depends(get_current_user)):
     if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     if uid == user.user_id:
@@ -2633,12 +2964,12 @@ async def admin_delete_user(uid: str, user: User = Depends(get_current_user)):
     if user.role != "super_admin" and is_admin_role(target.get("role", "")):
         raise HTTPException(403, "Only Super Admin can delete an admin account")
     await db.users.delete_one({"user_id": uid})
-    await log_admin_activity(user, "user_deleted", target_type="user", target_id=uid, detail=target.get("email"))
+    await log_admin_activity(user, "user_deleted", target_type="user", target_id=uid, detail=target.get("email"), request=request)
     return {"ok": True}
 
 
 @api.post("/admin/users/{uid}/force-logout")
-async def admin_force_logout(uid: str, user: User = Depends(get_current_user)):
+async def admin_force_logout(uid: str, request: Request, user: User = Depends(get_current_user)):
     """Immediately invalidates every session/JWT the target user currently holds."""
     if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
@@ -2648,7 +2979,7 @@ async def admin_force_logout(uid: str, user: User = Depends(get_current_user)):
     if target.get("role") == "super_admin" and uid != user.user_id:
         raise HTTPException(403, "Super Admin accounts can only force-logout themselves")
     await db.users.update_one({"user_id": uid}, {"$inc": {"pw_version": 1}})
-    await log_admin_activity(user, "force_logout", target_type="user", target_id=uid)
+    await log_admin_activity(user, "force_logout", target_type="user", target_id=uid, request=request)
     await log_security_event("force_logout", user_id=uid, email=target.get("email"))
     return {"ok": True, "message": "All active sessions for this user have been logged out."}
 
@@ -2680,7 +3011,7 @@ async def admin_list_products(
 
 
 @api.patch("/admin/products/{pid}")
-async def admin_update_product(pid: str, req: AdminProductUpdateReq, user: User = Depends(get_current_user)):
+async def admin_update_product(pid: str, req: AdminProductUpdateReq, request: Request, user: User = Depends(get_current_user)):
     if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     updates = {k: v for k, v in req.model_dump().items() if v is not None}
@@ -2690,31 +3021,31 @@ async def admin_update_product(pid: str, req: AdminProductUpdateReq, user: User 
     if result.matched_count == 0:
         raise HTTPException(404, "Product not found")
     doc = await db.products.find_one({"product_id": pid}, {"_id": 0})
-    await log_admin_activity(user, "product_updated", target_type="product", target_id=pid, detail=str(updates))
+    await log_admin_activity(user, "product_updated", target_type="product", target_id=pid, detail=str(updates), request=request)
     return doc
 
 
 @api.delete("/admin/products/{pid}")
-async def admin_delete_product(pid: str, user: User = Depends(get_current_user)):
+async def admin_delete_product(pid: str, request: Request, user: User = Depends(get_current_user)):
     if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     result = await db.products.delete_one({"product_id": pid})
     if result.deleted_count == 0:
         raise HTTPException(404, "Product not found")
-    await log_admin_activity(user, "product_deleted", target_type="product", target_id=pid)
+    await log_admin_activity(user, "product_deleted", target_type="product", target_id=pid, request=request)
     return {"ok": True}
 
 
 # ------------------ Admin: Orders ------------------
 @api.patch("/admin/orders/{oid}")
-async def admin_update_order(oid: str, req: AdminOrderUpdateReq, user: User = Depends(get_current_user)):
+async def admin_update_order(oid: str, req: AdminOrderUpdateReq, request: Request, user: User = Depends(get_current_user)):
     if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     result = await db.orders.update_one({"order_id": oid}, {"$set": {"status": req.status}})
     if result.matched_count == 0:
         raise HTTPException(404, "Order not found")
     doc = await db.orders.find_one({"order_id": oid}, {"_id": 0})
-    await log_admin_activity(user, "order_status_updated", target_type="order", target_id=oid, detail=req.status)
+    await log_admin_activity(user, "order_status_updated", target_type="order", target_id=oid, detail=req.status, request=request)
     return doc
 
 
@@ -2726,7 +3057,7 @@ async def admin_get_settings(user: User = Depends(get_current_user)):
 
 
 @api.put("/admin/settings")
-async def admin_update_settings(req: AdminSettingsUpdateReq, user: User = Depends(get_current_user)):
+async def admin_update_settings(req: AdminSettingsUpdateReq, request: Request, user: User = Depends(get_current_user)):
     require_super_admin(user)
     updates = {k: v for k, v in req.model_dump().items() if v is not None}
     if not updates:
@@ -2736,7 +3067,7 @@ async def admin_update_settings(req: AdminSettingsUpdateReq, user: User = Depend
     if "delivery_charge" in updates and updates["delivery_charge"] < 0:
         raise HTTPException(400, "Delivery charge cannot be negative")
     await db.settings.update_one({"settings_id": SETTINGS_DOC_ID}, {"$set": updates}, upsert=True)
-    await log_admin_activity(user, "settings_updated", target_type="settings", detail=str(updates))
+    await log_admin_activity(user, "settings_updated", target_type="settings", detail=str(updates), request=request)
     return await get_settings()
 
 
@@ -2788,7 +3119,7 @@ async def admin_list_categories(user: User = Depends(get_current_user)):
 
 
 @api.post("/admin/categories")
-async def admin_create_category(req: CategoryReq, user: User = Depends(get_current_user)):
+async def admin_create_category(req: CategoryReq, request: Request, user: User = Depends(get_current_user)):
     if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     if await db.categories.find_one({"id": req.id}):
@@ -2796,29 +3127,29 @@ async def admin_create_category(req: CategoryReq, user: User = Depends(get_curre
     doc = req.model_dump()
     await db.categories.insert_one(doc)
     doc.pop("_id", None)
-    await log_admin_activity(user, "category_created", target_type="category", target_id=req.id)
+    await log_admin_activity(user, "category_created", target_type="category", target_id=req.id, request=request)
     return doc
 
 
 @api.put("/admin/categories/{cid}")
-async def admin_update_category(cid: str, req: CategoryReq, user: User = Depends(get_current_user)):
+async def admin_update_category(cid: str, req: CategoryReq, request: Request, user: User = Depends(get_current_user)):
     if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     result = await db.categories.update_one({"id": cid}, {"$set": {"name": req.name, "icon": req.icon}})
     if result.matched_count == 0:
         raise HTTPException(404, "Category not found")
-    await log_admin_activity(user, "category_updated", target_type="category", target_id=cid)
+    await log_admin_activity(user, "category_updated", target_type="category", target_id=cid, request=request)
     return await db.categories.find_one({"id": cid}, {"_id": 0})
 
 
 @api.delete("/admin/categories/{cid}")
-async def admin_delete_category(cid: str, user: User = Depends(get_current_user)):
+async def admin_delete_category(cid: str, request: Request, user: User = Depends(get_current_user)):
     if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     result = await db.categories.delete_one({"id": cid})
     if result.deleted_count == 0:
         raise HTTPException(404, "Category not found")
-    await log_admin_activity(user, "category_deleted", target_type="category", target_id=cid)
+    await log_admin_activity(user, "category_deleted", target_type="category", target_id=cid, request=request)
     return {"ok": True}
 
 
@@ -2839,36 +3170,36 @@ async def admin_list_banners(user: User = Depends(get_current_user)):
 
 
 @api.post("/admin/banners")
-async def admin_create_banner(req: BannerReq, user: User = Depends(get_current_user)):
+async def admin_create_banner(req: BannerReq, request: Request, user: User = Depends(get_current_user)):
     if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     bid = f"banner_{uuid.uuid4().hex[:10]}"
     doc = {"banner_id": bid, **req.model_dump(), "created_at": now_iso()}
     await db.banners.insert_one(doc)
     doc.pop("_id", None)
-    await log_admin_activity(user, "banner_created", target_type="banner", target_id=bid)
+    await log_admin_activity(user, "banner_created", target_type="banner", target_id=bid, request=request)
     return doc
 
 
 @api.put("/admin/banners/{bid}")
-async def admin_update_banner(bid: str, req: BannerReq, user: User = Depends(get_current_user)):
+async def admin_update_banner(bid: str, req: BannerReq, request: Request, user: User = Depends(get_current_user)):
     if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     result = await db.banners.update_one({"banner_id": bid}, {"$set": req.model_dump()})
     if result.matched_count == 0:
         raise HTTPException(404, "Banner not found")
-    await log_admin_activity(user, "banner_updated", target_type="banner", target_id=bid)
+    await log_admin_activity(user, "banner_updated", target_type="banner", target_id=bid, request=request)
     return await db.banners.find_one({"banner_id": bid}, {"_id": 0})
 
 
 @api.delete("/admin/banners/{bid}")
-async def admin_delete_banner(bid: str, user: User = Depends(get_current_user)):
+async def admin_delete_banner(bid: str, request: Request, user: User = Depends(get_current_user)):
     if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
     result = await db.banners.delete_one({"banner_id": bid})
     if result.deleted_count == 0:
         raise HTTPException(404, "Banner not found")
-    await log_admin_activity(user, "banner_deleted", target_type="banner", target_id=bid)
+    await log_admin_activity(user, "banner_deleted", target_type="banner", target_id=bid, request=request)
     return {"ok": True}
 
 
@@ -3011,6 +3342,11 @@ async def startup_indexes():
         await db.password_reset_requests.create_index("created_at", expireAfterSeconds=int(RESET_REQUEST_WINDOW.total_seconds()) * 2)
         await db.admin_activity_logs.create_index("created_at")
         await db.admin_activity_logs.create_index("admin_id")
+        await db.pages.create_index("slug", unique=True)
+        await db.email_templates.create_index("key", unique=True)
+        await db.sms_templates.create_index("key", unique=True)
+        if await db.pages.count_documents({}) == 0:
+            await db.pages.insert_many([{**dict(p), "updated_at": now_iso()} for p in DEFAULT_PAGES])
         # Seed categories from the built-in defaults on first run only, so
         # admin edits/additions afterwards are never overwritten.
         if await db.categories.count_documents({}) == 0:
