@@ -63,7 +63,9 @@ DB_NAME = os.environ["DB_NAME"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 # AI key optional at boot — endpoints degrade gracefully if unset.
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "*")
+FRONTEND_URL = os.environ.get("FRONTEND_URL") or "https://kisanbaazar.in"
+if FRONTEND_URL in ("*", ""):
+    FRONTEND_URL = "https://kisanbaazar.in"
 # Set this to ".kisanbaazar.in" once the backend is served from a
 # kisanbaazar.in subdomain (e.g. api.kisanbaazar.in). This makes the auth
 # cookie first-party (shared registrable domain with the frontend), which is
