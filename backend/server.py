@@ -1,5 +1,6 @@
 """KisanBaazar - Agriculture Marketplace Backend."""
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, Cookie
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse, JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -86,6 +87,41 @@ client = AsyncIOMotorClient(
 db = client[DB_NAME]
 
 app = FastAPI(title="KisanBaazar API")
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Every 422 gets logged with the full request body and the exact
+    field(s) that failed, so a bad request from the frontend (missing field,
+    wrong type, null where a value was required) is immediately diagnosable
+    from the Render logs instead of just showing as a bare 422 to the user."""
+    try:
+        raw_body = await request.body()
+        body_preview = raw_body.decode("utf-8", errors="replace")[:2000]
+    except Exception:
+        body_preview = "<unavailable>"
+
+    missing_fields = []
+    field_errors = []
+    for err in exc.errors():
+        loc = ".".join(str(p) for p in err.get("loc", []) if p != "body")
+        if err.get("type") in ("missing", "value_error.missing"):
+            missing_fields.append(loc)
+        field_errors.append({"field": loc, "error": err.get("msg"), "type": err.get("type")})
+
+    logger.warning(
+        "[422] path=%s\nREQUEST BODY: %s\nVALIDATION ERRORS: %s\nMISSING FIELDS: %s",
+        request.url.path, body_preview, field_errors, missing_fields,
+    )
+    return JSONResponse(
+        status_code=422,
+        content={
+            "success": False,
+            "message": "Please fill all required fields." if missing_fields else "Some fields are invalid. Please check your input and try again.",
+            "missing_fields": missing_fields,
+            "errors": field_errors,
+        },
+    )
 api = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -2327,7 +2363,17 @@ async def bid(pid: str, req: BidReq, user: User = Depends(get_current_user)):
 # ------------------ Orders ------------------
 @api.post("/orders")
 async def create_order(req: OrderCreate, user: User = Depends(get_current_user)):
+    logger.info(
+        "[orders] REQUEST BODY user_id=%s items=%d delivery_method=%s payment_method=%s buyer_pincode=%s",
+        user.user_id, len(req.items), req.delivery_method, req.payment_method, req.buyer_pincode,
+    )
+    if not req.items:
+        raise HTTPException(400, "Your cart is empty — add at least one item before checking out.")
+    if any(it.qty <= 0 or it.price <= 0 for it in req.items):
+        raise HTTPException(400, "Invalid item quantity or price in your cart.")
     subtotal = sum(it.qty * it.price for it in req.items)
+    if subtotal <= 0:
+        raise HTTPException(400, "Invalid order amount.")
     cfg = await get_settings()
     fee_percent = cfg["platform_fee_percent"]
 
@@ -2418,6 +2464,7 @@ async def create_order(req: OrderCreate, user: User = Depends(get_current_user))
         amount=f"{charge_total:,}", delivery_method=req.delivery_method.replace("_", " "),
     )
     await send_email(to=user.email, subject=subject, html=html)
+    logger.info("[orders] RESPONSE BODY order_id=%s charge_total=%s razorpay_order_id=%s", oid, charge_total, rzp_id)
     return doc
 
 
