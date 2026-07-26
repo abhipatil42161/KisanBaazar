@@ -76,7 +76,13 @@ COOKIE_DOMAIN = os.environ.get("COOKIE_DOMAIN") or None
 # Initialise Cloudinary (no-op if env vars missing — see cloudinary_service)
 CLOUDINARY_ENABLED = configure_cloudinary()
 
-client = AsyncIOMotorClient(MONGO_URL)
+client = AsyncIOMotorClient(
+    MONGO_URL,
+    serverSelectionTimeoutMS=8000,
+    connectTimeoutMS=8000,
+    socketTimeoutMS=20000,
+    retryWrites=True,
+)
 db = client[DB_NAME]
 
 app = FastAPI(title="KisanBaazar API")
@@ -102,6 +108,9 @@ CSRF_EXEMPT_PATHS = {
     "/api/auth/csrf",
     "/api/auth/forgot-password",
     "/api/auth/reset-password",
+    "/api/auth/forgot-password/otp",
+    "/api/auth/reset-password/otp/verify",
+    "/api/auth/2fa/login-verify",
     "/api/payments/webhook",
 }
 
@@ -527,8 +536,29 @@ def hash_pw(pw: str) -> str:
     return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
 
 
-def verify_pw(pw: str, hashed: str) -> bool:
-    return bcrypt.checkpw(pw.encode(), hashed.encode())
+_BCRYPT_PREFIXES = ("$2a$", "$2b$", "$2y$")
+
+
+def is_valid_bcrypt_hash(h: Optional[str]) -> bool:
+    """True only for a well-formed bcrypt hash. Guards against legacy/corrupt
+    data (empty strings, placeholder values, hashes from a different scheme,
+    or anything else that isn't actually bcrypt) ever reaching bcrypt.checkpw."""
+    return bool(h) and isinstance(h, str) and h.startswith(_BCRYPT_PREFIXES) and len(h) == 60
+
+
+def verify_pw(pw: str, hashed: Optional[str]) -> bool:
+    """Never raises. An invalid/missing/legacy hash is simply treated as
+    'password does not match' rather than crashing the request — this is
+    what previously caused `ValueError: Invalid salt` to bubble all the way
+    up through password-reset and login for any account with a non-bcrypt
+    (or missing) password field."""
+    if not is_valid_bcrypt_hash(hashed):
+        return False
+    try:
+        return bcrypt.checkpw(pw.encode(), hashed.encode())
+    except (ValueError, TypeError) as e:
+        logger.warning("[auth] verify_pw: bcrypt.checkpw rejected a hash it thought was valid (%s) — treating as no match", e)
+        return False
 
 
 def make_jwt(user_id: str, pw_version: int = 0) -> str:
@@ -750,7 +780,51 @@ RESET_COMPLETED_EMAIL_HTML = """<p>Hi {name},</p>
 <p>— KisanBaazar Security</p>"""
 
 # ------------------ Email / SMS Templates (Super Admin editable) ------------------
+def _wrap_email(heading: str, body_html: str, cta_label: str = None, cta_url: str = None) -> str:
+    """Consistent branded shell for every KisanBaazar email: logo placeholder,
+    heading, body, optional CTA button, support details, copyright."""
+    cta = (
+        f'<div style="text-align:center;margin:24px 0">'
+        f'<a href="{cta_url}" style="background:#166534;color:#fff;padding:12px 28px;'
+        f'border-radius:8px;text-decoration:none;font-weight:600;display:inline-block">{cta_label}</a></div>'
+        if cta_label and cta_url else ""
+    )
+    return f"""<div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;color:#1f2937">
+  <div style="text-align:center;padding:20px 0">
+    <div style="width:48px;height:48px;background:#166534;border-radius:14px;display:inline-block;line-height:48px;color:#fff;font-size:22px">🌾</div>
+    <div style="font-weight:700;font-size:18px;margin-top:8px">KisanBaazar</div>
+  </div>
+  <div style="background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:24px">
+    <h2 style="margin-top:0;font-size:20px">{heading}</h2>
+    {body_html}
+    {cta}
+  </div>
+  <div style="text-align:center;color:#6b7280;font-size:12px;padding:20px 10px">
+    <p>Need help? Contact us at hello@kisanbaazar.in or 1800-KISAN-00</p>
+    <p><a href="https://kisanbaazar.in" style="color:#166534">kisanbaazar.in</a></p>
+    <p>© 2026 KisanBaazar. All rights reserved.</p>
+  </div>
+</div>"""
+
+
 DEFAULT_EMAIL_TEMPLATES = {
+    "welcome_email": {
+        "subject": "Welcome to KisanBaazar, {{name}}!",
+        "html": _wrap_email("Welcome to KisanBaazar 🌾", "<p>Hi {{name}},</p><p>Your account is ready. Start exploring fresh produce from farmers across India, or list your own if you're a seller.</p>",
+                             "Visit KisanBaazar", "https://kisanbaazar.in"),
+        "variables": ["name"],
+    },
+    "registration_successful": {
+        "subject": "Your KisanBaazar account is ready",
+        "html": _wrap_email("Registration Successful", "<p>Hi {{name}},</p><p>Your KisanBaazar account has been created successfully. You can now log in and start trading.</p>",
+                             "Log In", "https://kisanbaazar.in/login"),
+        "variables": ["name"],
+    },
+    "email_verification_otp": {
+        "subject": "Verify your KisanBaazar email",
+        "html": _wrap_email("Verify Your Email", "<p>Hi {{name}},</p><p>Your verification code is:</p><h1 style='letter-spacing:6px;text-align:center'>{{code}}</h1><p style='color:#b91c1c'>This code expires in 10 minutes. Never share it with anyone.</p>"),
+        "variables": ["name", "code"],
+    },
     "password_changed": {
         "subject": "Your KisanBaazar password was changed",
         "html": PASSWORD_CHANGED_EMAIL_HTML.replace("{name}", "{{name}}"),
@@ -761,6 +835,11 @@ DEFAULT_EMAIL_TEMPLATES = {
         "html": RESET_REQUESTED_EMAIL_HTML.replace("{link}", "{{link}}"),
         "variables": ["link"],
     },
+    "password_reset_otp": {
+        "subject": "Your KisanBaazar password reset code",
+        "html": _wrap_email("Reset Your Password", "<p>Your password reset code is:</p><h1 style='letter-spacing:6px;text-align:center'>{{code}}</h1><p style='color:#b91c1c'>This code expires in 10 minutes. If you didn't request this, you can ignore this email.</p>"),
+        "variables": ["code"],
+    },
     "password_reset_completed": {
         "subject": "Your KisanBaazar password was reset",
         "html": RESET_COMPLETED_EMAIL_HTML.replace("{name}", "{{name}}"),
@@ -768,14 +847,72 @@ DEFAULT_EMAIL_TEMPLATES = {
     },
     "order_confirmation": {
         "subject": "Your KisanBaazar order {{order_id}} is confirmed",
-        "html": "<p>Hi {{name}},</p><p>Your order <b>{{order_id}}</b> for ₹{{amount}} has been placed successfully.</p><p>Thank you for shopping with KisanBaazar!</p>",
+        "html": _wrap_email("Order Confirmed ✓", "<p>Hi {{name}},</p><p>Your order <b>{{order_id}}</b> for ₹{{amount}} has been placed successfully.</p><p>Delivery method: {{delivery_method}}</p>",
+                             "Track Order", "https://kisanbaazar.in/dashboard/buyer"),
+        "variables": ["name", "order_id", "amount", "delivery_method"],
+    },
+    "payment_successful": {
+        "subject": "Payment received for order {{order_id}}",
+        "html": _wrap_email("Payment Successful ✓", "<p>Hi {{name}},</p><p>We've received your payment of ₹{{amount}} for order <b>{{order_id}}</b>.</p>",
+                             "View Invoice", "https://kisanbaazar.in/dashboard/buyer"),
         "variables": ["name", "order_id", "amount"],
+    },
+    "order_shipped": {
+        "subject": "Your order {{order_id}} has shipped",
+        "html": _wrap_email("Order Shipped 🚚", "<p>Hi {{name}},</p><p>Your order <b>{{order_id}}</b> is on its way via {{delivery_method}}. Estimated delivery: {{eta}}.</p>",
+                             "Track Order", "https://kisanbaazar.in/dashboard/buyer"),
+        "variables": ["name", "order_id", "delivery_method", "eta"],
+    },
+    "order_delivered": {
+        "subject": "Your order {{order_id}} has been delivered",
+        "html": _wrap_email("Order Delivered ✓", "<p>Hi {{name}},</p><p>Your order <b>{{order_id}}</b> has been delivered. We hope you're happy with your produce!</p><p>Please consider leaving a review.</p>"),
+        "variables": ["name", "order_id"],
+    },
+    "order_cancelled": {
+        "subject": "Your order {{order_id}} was cancelled",
+        "html": _wrap_email("Order Cancelled", "<p>Hi {{name}},</p><p>Your order <b>{{order_id}}</b> has been cancelled. If a payment was made, a refund will follow our Refund Policy.</p>"),
+        "variables": ["name", "order_id"],
+    },
+    "refund_initiated": {
+        "subject": "Refund initiated for order {{order_id}}",
+        "html": _wrap_email("Refund Initiated", "<p>Hi {{name}},</p><p>A refund of ₹{{amount}} for order <b>{{order_id}}</b> has been initiated and will reflect in 5-7 business days.</p>"),
+        "variables": ["name", "order_id", "amount"],
+    },
+    "refund_successful": {
+        "subject": "Refund completed for order {{order_id}}",
+        "html": _wrap_email("Refund Completed ✓", "<p>Hi {{name}},</p><p>Your refund of ₹{{amount}} for order <b>{{order_id}}</b> has been completed.</p>"),
+        "variables": ["name", "order_id", "amount"],
+    },
+    "delivery_status_update": {
+        "subject": "Delivery update for order {{order_id}}",
+        "html": _wrap_email("Delivery Update", "<p>Hi {{name}},</p><p>Your order <b>{{order_id}}</b> delivery status is now: <b>{{status}}</b>.</p>",
+                             "Track Order", "https://kisanbaazar.in/dashboard/buyer"),
+        "variables": ["name", "order_id", "status"],
+    },
+    "seller_registration_approved": {
+        "subject": "You're approved to sell on KisanBaazar",
+        "html": _wrap_email("Seller Registration Approved ✓", "<p>Hi {{name}},</p><p>Your seller account has been verified and approved. You can now list your produce.</p>",
+                             "Go to Farmer Dashboard", "https://kisanbaazar.in/dashboard/farmer"),
+        "variables": ["name"],
+    },
+    "login_alert": {
+        "subject": "New sign-in to your KisanBaazar account",
+        "html": _wrap_email("New Sign-In Detected", "<p>Hi {{name}},</p><p>Your account was just accessed from a new device/IP ({{ip}}). If this was you, no action is needed. If not, change your password immediately.</p>"),
+        "variables": ["name", "ip"],
     },
 }
 
 DEFAULT_SMS_TEMPLATES = {
     "otp_verification": {"text": "Your KisanBaazar OTP is {{code}}. Valid for 10 minutes. Do not share this with anyone.", "variables": ["code"]},
+    "login_otp": {"text": "Your KisanBaazar login OTP is {{code}}. Valid for 10 minutes. Do not share this with anyone.", "variables": ["code"]},
+    "password_reset_otp": {"text": "Your KisanBaazar password reset OTP is {{code}}. Valid for 10 minutes.", "variables": ["code"]},
+    "password_changed": {"text": "Your KisanBaazar password has been changed successfully. If this wasn't you, contact support immediately.", "variables": []},
     "order_confirmation": {"text": "KisanBaazar: Order {{order_id}} confirmed. Total Rs.{{amount}}. Track it in the app.", "variables": ["order_id", "amount"]},
+    "payment_successful": {"text": "KisanBaazar: Payment of Rs.{{amount}} received for order {{order_id}}.", "variables": ["order_id", "amount"]},
+    "delivery_update": {"text": "KisanBaazar: Order {{order_id}} is now {{status}}.", "variables": ["order_id", "status"]},
+    "refund_successful": {"text": "KisanBaazar: Refund of Rs.{{amount}} for order {{order_id}} completed.", "variables": ["order_id", "amount"]},
+    "seller_approval": {"text": "KisanBaazar: Congrats {{name}}, your seller account is approved. Start listing your produce!", "variables": ["name"]},
+    "login_security_alert": {"text": "KisanBaazar: New login detected from {{ip}}. Not you? Reset your password now.", "variables": ["ip"]},
     "delivery_otp": {"text": "Your KisanBaazar delivery OTP is {{otp}}. Share this only with the delivery partner.", "variables": ["otp"]},
 }
 
@@ -887,6 +1024,7 @@ async def csrf_middleware(request: Request, call_next):
                 csrf_cookie = request.cookies.get(CSRF_COOKIE)
                 csrf_header = request.headers.get(CSRF_HEADER)
                 if not csrf_cookie or not csrf_header or not secrets.compare_digest(csrf_cookie, csrf_header):
+                    logger.warning("[csrf] blocked path=%s has_cookie=%s has_header=%s", path, bool(csrf_cookie), bool(csrf_header))
                     return JSONResponse(status_code=403, content={"detail": "CSRF token missing or invalid"})
     return await call_next(request)
 
@@ -904,10 +1042,18 @@ async def maintenance_mode_middleware(request: Request, call_next):
     """
     path = request.url.path
     exempt = any(path.startswith(p) for p in MAINTENANCE_EXEMPT_PREFIXES)
-    if exempt and request.method == "GET":
+    if exempt:
+        # Auth/recovery endpoints (login, forgot/reset password, 2FA, admin
+        # APIs) must always be reachable regardless of maintenance state —
+        # including POST, not just GET — and should never depend on this
+        # middleware's own DB call succeeding.
         return await call_next(request)
 
-    m = await get_maintenance()
+    try:
+        m = await get_maintenance()
+    except Exception:
+        logger.exception("[maintenance] status check failed — failing open so this never blocks real traffic")
+        return await call_next(request)
     if not m["enabled"]:
         return await call_next(request)
 
@@ -915,11 +1061,14 @@ async def maintenance_mode_middleware(request: Request, call_next):
     user_id = _user_id_from_jwt(token) if token else None
     role = None
     if user_id:
-        u = await db.users.find_one({"user_id": user_id}, {"_id": 0, "role": 1})
-        role = u.get("role") if u else None
+        try:
+            u = await db.users.find_one({"user_id": user_id}, {"_id": 0, "role": 1})
+            role = u.get("role") if u else None
+        except Exception:
+            logger.exception("[maintenance] role lookup failed — treating as non-admin")
 
     if m.get("emergency"):
-        if role == "super_admin" or exempt:
+        if role == "super_admin":
             return await call_next(request)
         return JSONResponse(status_code=503, content={"detail": m["message"], "emergency": True})
 
@@ -1071,15 +1220,112 @@ class PageReq(BaseModel):
 
 DEFAULT_PAGES = [
     {"slug": "about-us", "title": "About Us",
-     "content": "<h2>About KisanBaazar</h2><p>KisanBaazar connects Indian farmers directly with buyers, retailers, wholesalers, and exporters — cutting out middlemen and ensuring fair prices for everyone.</p>"},
+     "content": """<h2>About KisanBaazar</h2>
+<p>KisanBaazar — <em>"Thet Shetatun Tumchya Paryant"</em> (Straight from the farm to you) — connects Indian farmers directly with buyers, retailers, wholesalers, and exporters, cutting out middlemen and ensuring fair prices for everyone.</p>
+<p>We provide farmers with a digital marketplace to list produce, negotiate prices, manage orders, and reach customers across India and internationally — while giving buyers transparent pricing, quality assurance, and reliable delivery.</p>
+<h3>Our Mission</h3>
+<p>To empower Indian farmers with direct market access, fair pricing, and modern trade tools, while building a trusted, transparent agricultural supply chain.</p>"""},
     {"slug": "privacy-policy", "title": "Privacy Policy",
-     "content": "<h2>Privacy Policy</h2><p>We collect only the information needed to operate the marketplace — account details, order history, and payment records. We never sell your data to third parties.</p>"},
+     "content": """<h2>Privacy Policy</h2>
+<p>We collect only the information needed to operate the marketplace — account details, order history, delivery addresses, and payment records. We never sell your data to third parties.</p>
+<h3>Cookies Policy</h3>
+<p>We use essential cookies for login sessions and preferences (theme, language, cart). See our <a href="/pages/cookie-policy">Cookie Policy</a> for details.</p>
+<h3>OTP Verification</h3>
+<p>Email/SMS OTPs are used solely to verify account ownership during registration, login, and password reset. Codes expire within 10 minutes and are never stored in plain text.</p>
+<h3>Payment Security</h3>
+<p>Payments are processed via Razorpay's PCI-DSS compliant infrastructure. KisanBaazar never stores your card, UPI, or bank details.</p>
+<h3>Image &amp; Cloud Storage</h3>
+<p>Product images/videos you upload are stored securely via Cloudinary with access-controlled delivery URLs.</p>
+<h3>International Data Handling</h3>
+<p>For export/international buyers, only the minimum shipping and billing information required for customs and delivery is shared with logistics partners.</p>
+<h3>Account Deletion</h3>
+<p>You may request account deletion at any time by contacting support; we retain only what's legally required (e.g. transaction records) for the statutory period.</p>"""},
     {"slug": "terms-conditions", "title": "Terms & Conditions",
-     "content": "<h2>Terms & Conditions</h2><p>By using KisanBaazar, you agree to trade honestly, provide accurate product information, and comply with applicable Indian agricultural trade laws.</p>"},
+     "content": """<h2>Terms & Conditions</h2>
+<p>By using KisanBaazar, you agree to trade honestly, provide accurate product information, and comply with applicable Indian agricultural trade laws.</p>
+<h3>Buyer Rules</h3><p>Buyers must provide accurate delivery details and make payment in good faith. Abuse of the refund/return system may result in account suspension.</p>
+<h3>Seller Rules</h3><p>Farmers/sellers must list produce accurately (quality, quantity, harvest date) and fulfill confirmed orders within the promised timeline.</p>
+<h3>Marketplace &amp; Payment Rules</h3><p>All payments are routed through Razorpay. Off-platform payment requests are not permitted and are not covered by KisanBaazar's buyer protection.</p>
+<h3>Delivery &amp; International Transactions</h3><p>Delivery method and charges are agreed at checkout. Export/international orders are subject to additional customs, currency, and documentation requirements.</p>
+<h3>Account Suspension &amp; Fraud Prevention</h3><p>Accounts found engaging in fraud, fake listings, or payment abuse may be suspended or permanently banned, with relevant transactions reported as required by law.</p>"""},
     {"slug": "refund-policy", "title": "Refund Policy",
-     "content": "<h2>Refund Policy</h2><p>Refunds are processed for cancelled or undelivered orders within 5-7 business days to the original payment method.</p>"},
+     "content": """<h2>Refund Policy</h2>
+<h3>Eligibility</h3><p>Refunds apply to cancelled orders, undelivered orders, or produce that arrives significantly different from its listing (quality/quantity mismatch), reported within 48 hours of delivery.</p>
+<h3>Timelines</h3><p>Approved refunds are processed within 5-7 business days to the original payment method.</p>
+<h3>Partial &amp; Full Refunds</h3><p>Partial refunds apply for partial quantity/quality issues; full refunds apply for non-delivery or order cancellation before dispatch.</p>
+<h3>Seller &amp; Buyer Rules</h3><p>Sellers are responsible for accurate listings; buyers are responsible for accurate delivery information. Refund disputes are reviewed by KisanBaazar admin.</p>
+<h3>Payment Gateway &amp; Delivery Refunds</h3><p>Razorpay processes the monetary refund; delivery charges are refunded only when the order was cancelled before dispatch or was never delivered.</p>"""},
     {"slug": "shipping-policy", "title": "Shipping Policy",
-     "content": "<h2>Shipping Policy</h2><p>Delivery timelines depend on the method chosen at checkout — pickup, local delivery, courier, or transport — and are shown before you pay.</p>"},
+     "content": """<h2>Shipping Policy</h2>
+<p>KisanBaazar supports five delivery methods: Local Delivery Boy, Courier Services, Transport Companies, Buyer Pickup from Farmer, and Seller Self-Delivery — plus National and International shipping for export-ready produce.</p>
+<h3>Estimated Timelines</h3><p>Pickup: same day. Local delivery: 1 day. Courier: 2-4 days. Transport (bulk): 3-5 days. International: varies by destination and customs clearance.</p>
+<h3>Delivery Charges</h3><p>Charges are calculated dynamically based on distance, weight, and method, and shown before payment — see the Fees &amp; Delivery settings for current rates.</p>
+<h3>Order Tracking</h3><p>Every order gets a delivery status timeline and OTP-based delivery confirmation, visible from your order dashboard.</p>
+<h3>Delivery Exceptions, Damage &amp; Missing Orders</h3><p>Report damaged or missing deliveries within 48 hours via Help &amp; Support for investigation and eligible refund/replacement.</p>"""},
+    {"slug": "cancellation-policy", "title": "Cancellation Policy",
+     "content": """<h2>Cancellation Policy</h2>
+<p>Orders can be cancelled free of charge before they are dispatched by the seller. Once an order is out for delivery or shipped, cancellation may not be possible — please request a return/refund after delivery instead.</p>
+<p>To cancel, go to your Orders page and select Cancel, or contact <a href="/pages/contact-us">Support</a>. Refunds for cancelled orders follow the standard <a href="/pages/refund-policy">Refund Policy</a> timelines.</p>"""},
+    {"slug": "contact-us", "title": "Contact Us",
+     "content": """<h2>Contact Us</h2>
+<p>We're here to help farmers, buyers, and exporters with any question about orders, payments, or listings.</p>
+<ul>
+<li><strong>Email:</strong> hello@kisanbaazar.in</li>
+<li><strong>Phone:</strong> 1800-KISAN-00</li>
+<li><strong>Address:</strong> Pune, Maharashtra, India</li>
+</ul>
+<p>For order-specific issues, please include your Order ID for faster support.</p>"""},
+    {"slug": "help-support", "title": "Help & Support",
+     "content": """<h2>Help &amp; Support</h2>
+<p>Common topics:</p>
+<ul>
+<li>Tracking an order — visit your Orders dashboard for live status</li>
+<li>Payment issues — check Payment Management in your account, or contact support with the transaction ID</li>
+<li>Refunds — see our <a href="/pages/refund-policy">Refund Policy</a></li>
+<li>Account &amp; password — use Forgot Password or Change Password from your account menu</li>
+</ul>
+<p>Still stuck? Reach us via the <a href="/pages/contact-us">Contact Us</a> page.</p>"""},
+    {"slug": "buyer-policy", "title": "Buyer Policy",
+     "content": """<h2>Buyer Policy</h2>
+<p>Buyers on KisanBaazar are expected to provide accurate delivery details, make payments only through the platform's secure checkout, and report any delivery or quality issues within 48 hours.</p>
+<p>Buyer protection covers non-delivery, significant quality mismatches, and payment errors — see the <a href="/pages/refund-policy">Refund Policy</a> for details. Abuse of returns/refunds may result in account restrictions.</p>"""},
+    {"slug": "seller-policy", "title": "Seller Policy",
+     "content": """<h2>Seller (Farmer) Policy</h2>
+<p>Sellers must list produce with accurate price, quantity, quality grade, and harvest date. Confirmed orders must be fulfilled within the delivery method's promised timeline.</p>
+<p>Repeated cancellations, misrepresented listings, or delivery failures may affect a seller's marketplace standing and, in serious cases, lead to account suspension.</p>"""},
+    {"slug": "delivery-policy", "title": "Delivery Policy",
+     "content": """<h2>Delivery Policy</h2>
+<p>KisanBaazar's hybrid delivery system supports Local Delivery, Courier, Transport, Buyer Pickup, and Seller Self-Delivery. Every delivery is tracked with a status timeline, and local/courier deliveries use an OTP handoff to confirm receipt.</p>
+<p>Delivery charges are calculated transparently at checkout based on distance, weight, and method — see the <a href="/pages/shipping-policy">Shipping Policy</a> for full details.</p>"""},
+    {"slug": "security-policy", "title": "Security Policy",
+     "content": """<h2>Security Policy</h2>
+<p>KisanBaazar protects your account with:</p>
+<ul>
+<li>Bcrypt password hashing — we never store plain-text passwords</li>
+<li>Email &amp; SMS OTP verification for sign-up and password recovery</li>
+<li>Optional Two-Factor Authentication (TOTP-based) for an extra login layer</li>
+<li>Login alerts for sign-ins from a new device/location</li>
+<li>Automatic account lockout after repeated failed login attempts</li>
+<li>CSRF protection and rate limiting across all sensitive actions</li>
+<li>Secure, PCI-DSS compliant payments via Razorpay</li>
+</ul>
+<p>If you notice suspicious activity on your account, change your password immediately and contact support.</p>"""},
+    {"slug": "cookie-policy", "title": "Cookie Policy",
+     "content": """<h2>Cookie Policy</h2>
+<p>KisanBaazar uses a small number of essential cookies:</p>
+<ul>
+<li><strong>kb_token</strong> — keeps you signed in</li>
+<li><strong>csrf_token</strong> — protects your account from cross-site request forgery</li>
+<li><strong>kb_cart</strong>, <strong>kb_theme</strong> — remembers your cart and light/dark preference</li>
+</ul>
+<p>We do not use third-party advertising or tracking cookies. Disabling essential cookies in your browser may prevent login and checkout from working.</p>"""},
+    {"slug": "faq", "title": "FAQ",
+     "content": """<h2>Frequently Asked Questions</h2>
+<p><strong>How do I sell produce on KisanBaazar?</strong><br>Register as a Farmer, verify your account, and list your first product from your Farmer Dashboard.</p>
+<p><strong>What payment methods are supported?</strong><br>UPI, cards, net banking, wallets, and Cash on Delivery (where available), all via Razorpay.</p>
+<p><strong>How is delivery charged?</strong><br>Dynamically, based on the method you choose and the distance/weight of your order — shown before you pay.</p>
+<p><strong>How do refunds work?</strong><br>See our <a href="/pages/refund-policy">Refund Policy</a> — approved refunds take 5-7 business days.</p>
+<p><strong>Is my payment information safe?</strong><br>Yes — KisanBaazar never stores your card or bank details; all payments are processed by Razorpay.</p>"""},
 ]
 
 
@@ -1302,6 +1548,8 @@ async def register_verify_otp(req: RegisterVerifyReq, response: Response):
     await db.users.insert_one(doc)
     token = make_jwt(user_id)
     csrf = _set_auth_cookies(response, token)
+    subject, html = await get_email_template("welcome_email", name=doc["name"])
+    await send_email(to=email, subject=subject, html=html)
     return {"user": public_user(doc), "csrf_token": csrf}
 
 
@@ -1376,12 +1624,8 @@ async def login(req: LoginReq, request: Request, response: Response):
         has_prior_logins = await db.security_logs.find_one({"user_id": user["user_id"], "event_type": "login_success"})
         if has_prior_logins and not seen_before:
             await log_security_event("suspicious_login", user_id=user["user_id"], email=email, ip=ip, detail="New IP address")
-            await send_email(
-                to=email, subject="New sign-in to your KisanBaazar account",
-                html=f"<p>Hi {user.get('name', '')},</p><p>Your account was just accessed from a new IP address "
-                     f"({ip}). If this was you, no action is needed. If not, please change your password immediately.</p>"
-                     f"<p>— KisanBaazar Security</p>",
-            )
+            subject, html = await get_email_template("login_alert", name=user.get("name", ""), ip=ip)
+            await send_email(to=email, subject=subject, html=html)
         await log_security_event("login_success", user_id=user["user_id"], email=email, ip=ip)
 
     if user.get("totp_enabled"):
@@ -1488,6 +1732,7 @@ async def forgot_password(req: ForgotPasswordReq, request: Request):
             "created_at": now_iso(),
         })
         reset_link = f"{FRONTEND_URL.rstrip('/')}/reset-password?token={token}"
+        logger.info("[password-reset] token generated for user_id=%s link=%s", user["user_id"], reset_link)
         subject, html = await get_email_template("password_reset_requested", link=reset_link)
         await send_email(
             to=email, subject=subject, html=html,
@@ -1501,11 +1746,30 @@ async def forgot_password(req: ForgotPasswordReq, request: Request):
 async def reset_password(req: ResetPasswordReq, request: Request):
     check_password_strength(req.new_password)
     rec = await db.password_reset_tokens.find_one({"token": req.token})
-    if not rec or rec.get("used"):
+    if not rec:
+        logger.info("[password-reset] token not found — token=%s...", req.token[:8])
         raise HTTPException(400, "Invalid or expired reset token")
+
+    if rec.get("used"):
+        # Same class of issue as the registration-OTP double-submit bug: a
+        # slow/cold-start response can make the client think the request
+        # failed even though the password was already updated successfully.
+        # If this token was used moments ago, treat a retry as success
+        # instead of surfacing a confusing failure.
+        used_at = rec.get("used_at")
+        if used_at:
+            used_dt = await _ensure_aware(datetime.fromisoformat(used_at) if isinstance(used_at, str) else used_at)
+            if datetime.now(timezone.utc) - used_dt < timedelta(seconds=60):
+                logger.info("[password-reset] retry within grace window — token=%s..., treating as success", req.token[:8])
+                return {"ok": True, "message": "Password updated. You can now log in."}
+        logger.info("[password-reset] token already used — token=%s...", req.token[:8])
+        raise HTTPException(400, "Invalid or expired reset token")
+
     expires_at = await _ensure_aware(rec["expires_at"])
     if expires_at < datetime.now(timezone.utc):
+        logger.info("[password-reset] token expired — token=%s...", req.token[:8])
         raise HTTPException(400, "Invalid or expired reset token")
+    logger.info("[password-reset] token verified for user_id=%s", rec["user_id"])
 
     user = await db.users.find_one({"user_id": rec["user_id"]}, {"_id": 0})
     if not user:
@@ -1517,9 +1781,10 @@ async def reset_password(req: ResetPasswordReq, request: Request):
         {
             "$set": {"password": hash_pw(req.new_password)},
             "$inc": {"pw_version": 1},  # invalidates every previously issued JWT — logs out all devices
-            "$push": {"password_history": {"$each": [user.get("password", "")], "$slice": -PASSWORD_HISTORY_LIMIT}},
+            "$push": {"password_history": {"$each": _history_entry(user.get("password")), "$slice": -PASSWORD_HISTORY_LIMIT}},
         },
     )
+    logger.info("[password-reset] password updated + all sessions invalidated for user_id=%s", rec["user_id"])
     # Single-use: mark this token used, and invalidate any other outstanding tokens for this user too.
     await db.password_reset_tokens.update_many(
         {"user_id": rec["user_id"], "used": False}, {"$set": {"used": True, "used_at": now_iso()}},
@@ -1528,6 +1793,7 @@ async def reset_password(req: ResetPasswordReq, request: Request):
     subject, html = await get_email_template("password_reset_completed", name=user.get("name", ""))
     await send_email(to=rec["email"], subject=subject, html=html)
     await log_security_event("password_reset_completed", user_id=rec["user_id"], email=rec["email"], ip=get_client_ip(request))
+    logger.info("[password-reset] user_id=%s logged out of all devices, reset flow complete", rec["user_id"])
     return {"ok": True, "message": "Password updated. You can now log in."}
 
 
@@ -1543,14 +1809,33 @@ async def forgot_password_otp(req: ForgotPasswordOtpReq, request: Request):
         user = await db.users.find_one({"email": email}, {"_id": 0, "user_id": 1})
         if user:
             session_id, code = await otp_service.create(db, purpose="reset-password", email=email, payload={"user_id": user["user_id"]})
-            await send_email(
-                to=email, subject="Your KisanBaazar password reset code",
-                html=f"<p>Your password reset code is:</p><h2 style='letter-spacing:4px'>{code}</h2><p>This code expires in 10 minutes.</p>",
-                text=f"Your password reset code: {code} (expires in 10 minutes)",
-            )
+            logger.info("[password-reset] OTP generated session=%s user_id=%s", session_id, user["user_id"])
+            subject, html = await get_email_template("password_reset_otp", code=code)
+            await send_email(to=email, subject=subject, html=html, text=f"Your password reset code: {code} (expires in 10 minutes)")
             await log_security_event("password_reset_requested", user_id=user["user_id"], email=email, ip=get_client_ip(request))
             return {"ok": True, "otp_session": session_id, "message": "If an account exists for that email, a code has been sent."}
     return {"ok": True, "otp_session": None, "message": "If an account exists for that email, a code has been sent."}
+
+
+async def _apply_password_reset(user: dict, new_password: str, request: Request) -> None:
+    """Shared final step for both the token and OTP reset flows: hash + set
+    the new password, bump pw_version (logs out every other device), record
+    password history, notify the user, and audit-log the event."""
+    _reject_if_password_reused(new_password, user)
+    await db.users.update_one(
+        {"user_id": user["user_id"]},
+        {
+            "$set": {"password": hash_pw(new_password)},
+            "$inc": {"pw_version": 1},
+            "$push": {"password_history": {"$each": _history_entry(user.get("password")), "$slice": -PASSWORD_HISTORY_LIMIT}},
+        },
+    )
+    logger.info("[password-reset] password updated + all sessions invalidated for user_id=%s", user["user_id"])
+    await clear_attempts_for_email(user["email"])
+    subject, html = await get_email_template("password_reset_completed", name=user.get("name", ""))
+    await send_email(to=user["email"], subject=subject, html=html)
+    await log_security_event("password_reset_completed", user_id=user["user_id"], email=user["email"], ip=get_client_ip(request))
+    logger.info("[password-reset] user_id=%s logged out of all devices, reset flow complete", user["user_id"])
 
 
 @api.post("/auth/reset-password/otp/verify")
@@ -1558,41 +1843,58 @@ async def reset_password_otp_verify(req: ResetPasswordOtpVerifyReq, request: Req
     check_password_strength(req.new_password)
     try:
         payload = await otp_service.verify(db, session_id=req.otp_session, code=req.code)
+        logger.info("[password-reset] OTP verified session=%s", req.otp_session)
     except ValueError as e:
         msg = str(e)
         if msg == "session_not_found":
+            logger.info("[password-reset] OTP session not found: %s", req.otp_session)
             raise HTTPException(404, ERR["session_gone"])
         if msg == "expired":
+            logger.info("[password-reset] OTP expired: %s", req.otp_session)
             raise HTTPException(410, ERR["otp_expired"])
         if msg == "too_many_attempts":
+            logger.info("[password-reset] OTP too many attempts: %s", req.otp_session)
             raise HTTPException(429, ERR["otp_max"])
+        if msg.startswith("already_consumed:"):
+            # Same class of issue as the registration-OTP double-submit bug:
+            # a slow/cold-start response can make the client retry even
+            # though the reset already completed. Re-applying the same new
+            # password is idempotent and safe — treat this as success rather
+            # than showing a confusing failure.
+            already_email = msg.split(":", 1)[1]
+            logger.info("[password-reset] retry on already-consumed OTP — email=%s, treating as success", already_email)
+            existing = await db.users.find_one({"email": already_email}, {"_id": 0})
+            if existing:
+                await _apply_password_reset(existing, req.new_password, request)
+                return {"ok": True, "message": "Password updated. You can now log in."}
+        logger.info("[password-reset] OTP invalid code: %s", req.otp_session)
         raise HTTPException(400, ERR["otp_invalid"])
 
     user_id = payload.get("user_id")
     user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
     if not user:
         raise HTTPException(400, "Account not found")
-    _reject_if_password_reused(req.new_password, user)
-
-    await db.users.update_one(
-        {"user_id": user_id},
-        {
-            "$set": {"password": hash_pw(req.new_password)},
-            "$inc": {"pw_version": 1},
-            "$push": {"password_history": {"$each": [user.get("password", "")], "$slice": -PASSWORD_HISTORY_LIMIT}},
-        },
-    )
-    await clear_attempts_for_email(user["email"])
-    subject, html = await get_email_template("password_reset_completed", name=user.get("name", ""))
-    await send_email(to=user["email"], subject=subject, html=html)
-    await log_security_event("password_reset_completed", user_id=user_id, email=user["email"], ip=get_client_ip(request))
+    await _apply_password_reset(user, req.new_password, request)
     return {"ok": True, "message": "Password updated. You can now log in."}
 
 
+def _history_entry(old_password: Optional[str]) -> list:
+    """What to $push into password_history — only ever a genuinely valid
+    bcrypt hash, never an empty string or corrupt legacy value."""
+    return [old_password] if is_valid_bcrypt_hash(old_password) else []
+
+
 def _reject_if_password_reused(new_password: str, user: dict) -> None:
-    history = user.get("password_history", []) + ([user["password"]] if user.get("password") else [])
+    """Blocks reusing any of the last PASSWORD_HISTORY_LIMIT passwords.
+    Only well-formed bcrypt hashes are checked — legacy/corrupt/missing
+    entries (e.g. a Google-OAuth account with no password ever set) are
+    skipped rather than passed to bcrypt, which is what previously crashed
+    with `ValueError: Invalid salt`."""
+    history = list(user.get("password_history", []))
+    if is_valid_bcrypt_hash(user.get("password")):
+        history.append(user["password"])
     for old_hash in history:
-        if old_hash and verify_pw(new_password, old_hash):
+        if is_valid_bcrypt_hash(old_hash) and verify_pw(new_password, old_hash):
             raise HTTPException(400, "You've used this password before — please choose a different one")
 
 
@@ -1611,7 +1913,7 @@ async def change_password(req: ChangePasswordReq, request: Request, response: Re
         {"user_id": user.user_id},
         {
             "$set": {"password": hash_pw(req.new_password), "pw_version": new_pwv},
-            "$push": {"password_history": {"$each": [doc["password"]], "$slice": -PASSWORD_HISTORY_LIMIT}},
+            "$push": {"password_history": {"$each": _history_entry(doc.get("password")), "$slice": -PASSWORD_HISTORY_LIMIT}},
         },
     )
     subject, html = await get_email_template("password_changed", name=doc.get("name", ""))
@@ -2110,6 +2412,12 @@ async def create_order(req: OrderCreate, user: User = Depends(get_current_user))
         "created_at": now_iso(),
     }
     await db.deliveries.insert_one(delivery_doc)
+
+    subject, html = await get_email_template(
+        "order_confirmation", name=user.name, order_id=oid,
+        amount=f"{charge_total:,}", delivery_method=req.delivery_method.replace("_", " "),
+    )
+    await send_email(to=user.email, subject=subject, html=html)
     return doc
 
 
@@ -2189,6 +2497,15 @@ async def update_delivery_status(did: str, req: DeliveryStatusReq, user: User = 
     )
     if req.status == "delivered":
         await db.orders.update_one({"order_id": d["order_id"]}, {"$set": {"status": "delivered"}})
+
+    order = await db.orders.find_one({"order_id": d["order_id"]}, {"_id": 0, "buyer_id": 1})
+    buyer = await db.users.find_one({"user_id": order["buyer_id"]}, {"_id": 0, "email": 1, "name": 1}) if order else None
+    if buyer:
+        if req.status == "delivered":
+            subject, html = await get_email_template("order_delivered", name=buyer.get("name", ""), order_id=d["order_id"])
+        else:
+            subject, html = await get_email_template("delivery_status_update", name=buyer.get("name", ""), order_id=d["order_id"], status=req.status.replace("_", " "))
+        await send_email(to=buyer["email"], subject=subject, html=html)
     return await db.deliveries.find_one({"delivery_id": did}, {"_id": 0})
 
 
@@ -2419,6 +2736,7 @@ async def verify_payment(oid: str, req: PaymentVerifyReq, user: User = Depends(g
             reason="signature_mismatch",
         )
         raise HTTPException(400, "Invalid payment signature")
+    already_paid = order.get("payment_status") == "paid"
     await finalise_paid_order(
         db,
         order=order,
@@ -2427,6 +2745,14 @@ async def verify_payment(oid: str, req: PaymentVerifyReq, user: User = Depends(g
         amount_paise=int(order.get("razorpay_amount_paise") or 0),
         source="verify",
     )
+    if not already_paid:
+        buyer = await db.users.find_one({"user_id": order["buyer_id"]}, {"_id": 0, "email": 1, "name": 1})
+        if buyer:
+            subject, html = await get_email_template(
+                "payment_successful", name=buyer.get("name", ""),
+                order_id=oid, amount=f"{(order.get('razorpay_amount_paise') or 0) / 100:,.0f}",
+            )
+            await send_email(to=buyer["email"], subject=subject, html=html)
     return {"ok": True, "payment_id": req.razorpay_payment_id}
 
 
@@ -2626,6 +2952,15 @@ async def admin_refund(
             amount_paise=int(refund.get("amount") or amount_paise or pmt["amount_paise"]),
             status=refund.get("status", "processed"),
         )
+        order = await db.orders.find_one({"order_id": pmt.get("order_id")}, {"_id": 0, "buyer_id": 1})
+        buyer = await db.users.find_one({"user_id": order["buyer_id"]}, {"_id": 0, "email": 1, "name": 1}) if order else None
+        if buyer:
+            refunded_amount = (int(refund.get("amount") or amount_paise or pmt["amount_paise"])) / 100
+            subject, html = await get_email_template(
+                "refund_successful", name=buyer.get("name", ""),
+                order_id=pmt.get("order_id", ""), amount=f"{refunded_amount:,.0f}",
+            )
+            await send_email(to=buyer["email"], subject=subject, html=html)
         return {"ok": True, "refund_id": refund["id"], "status": refund.get("status")}
     except HTTPException:
         raise
@@ -3048,6 +3383,16 @@ async def admin_update_order(oid: str, req: AdminOrderUpdateReq, request: Reques
         raise HTTPException(404, "Order not found")
     doc = await db.orders.find_one({"order_id": oid}, {"_id": 0})
     await log_admin_activity(user, "order_status_updated", target_type="order", target_id=oid, detail=req.status, request=request)
+
+    buyer = await db.users.find_one({"user_id": doc["buyer_id"]}, {"_id": 0, "email": 1, "name": 1})
+    if buyer:
+        template_key = {"shipped": "order_shipped", "delivered": "order_delivered", "cancelled": "order_cancelled"}.get(req.status)
+        if template_key:
+            kwargs = {"name": buyer.get("name", ""), "order_id": oid}
+            if template_key == "order_shipped":
+                kwargs.update(delivery_method=doc.get("delivery_method", "").replace("_", " "), eta=doc.get("estimated_delivery_date", "soon"))
+            subject, html = await get_email_template(template_key, **kwargs)
+            await send_email(to=buyer["email"], subject=subject, html=html)
     return doc
 
 
@@ -3347,8 +3692,11 @@ async def startup_indexes():
         await db.pages.create_index("slug", unique=True)
         await db.email_templates.create_index("key", unique=True)
         await db.sms_templates.create_index("key", unique=True)
-        if await db.pages.count_documents({}) == 0:
-            await db.pages.insert_many([{**dict(p), "updated_at": now_iso()} for p in DEFAULT_PAGES])
+        existing_slugs = {p["slug"] async for p in db.pages.find({}, {"_id": 0, "slug": 1})}
+        missing_pages = [{**dict(p), "updated_at": now_iso()} for p in DEFAULT_PAGES if p["slug"] not in existing_slugs]
+        if missing_pages:
+            await db.pages.insert_many(missing_pages)
+            logger.info("[startup] seeded %d new default page(s): %s", len(missing_pages), [p["slug"] for p in missing_pages])
         # Seed categories from the built-in defaults on first run only, so
         # admin edits/additions afterwards are never overwritten.
         if await db.categories.count_documents({}) == 0:
