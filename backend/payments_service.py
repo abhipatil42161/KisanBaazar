@@ -102,8 +102,9 @@ async def finalise_paid_order(
             return existing
         raise
 
-    # 3) Atomically mark the order paid + flag stock-deducted so concurrent
-    #    calls can't double-debit.
+    # 3) Atomically mark the order paid. Stock was already reserved
+    #    atomically at order-creation time (see create_order in server.py);
+    #    here we just flip status and credit sold_qty for reporting.
     upd = await db.orders.update_one(
         {"order_id": oid, "stock_deducted": {"$ne": True}},
         {"$set": {
@@ -115,17 +116,12 @@ async def finalise_paid_order(
             "stock_deducted": True,
         }},
     )
-
-    # 4) If WE were the writer that flipped stock_deducted -> decrement stock.
     if upd.modified_count == 1:
         for it in order.get("items", []):
             pid = it.get("product_id")
             qty = int(it.get("qty") or 0)
             if pid and qty > 0:
-                await db.products.update_one(
-                    {"product_id": pid},
-                    {"$inc": {"available_qty": -qty}},
-                )
+                await db.products.update_one({"product_id": pid}, {"$inc": {"sold_qty": qty}})
 
     # 5) Notify buyer + every farmer whose product is in the cart.
     await _create_notification(
@@ -182,10 +178,16 @@ async def mark_payment_failed(
         "failure_reason": reason or "unknown",
         "created_at": _now_iso(),
     })
-    await db.orders.update_one(
-        {"order_id": order["order_id"]},
-        {"$set": {"payment_status": "failed"}},
+    upd = await db.orders.update_one(
+        {"order_id": order["order_id"], "stock_released": {"$ne": True}},
+        {"$set": {"payment_status": "failed", "stock_released": True}},
     )
+    if upd.modified_count == 1:
+        for it in order.get("items", []):
+            pid = it.get("product_id")
+            qty = int(it.get("qty") or 0)
+            if pid and qty > 0:
+                await db.products.update_one({"product_id": pid}, {"$inc": {"available_qty": qty}})
     await _create_notification(
         db,
         user_id=order["buyer_id"],
@@ -225,7 +227,7 @@ async def record_refund(
     # Restore stock + flip the order to cancelled once per refund event.
     if not already_refunded and payment.get("order_id"):
         order = await db.orders.find_one({"order_id": payment["order_id"]}, {"_id": 0})
-        if order:
+        if order and order.get("status") != "cancelled":
             await db.orders.update_one(
                 {"order_id": order["order_id"]},
                 {"$set": {"status": "cancelled", "payment_status": "refunded"}},
@@ -236,8 +238,14 @@ async def record_refund(
                 if pid and qty > 0:
                     await db.products.update_one(
                         {"product_id": pid},
-                        {"$inc": {"available_qty": qty}},
+                        {"$inc": {"available_qty": qty, "sold_qty": -qty, "cancelled_qty": qty}},
                     )
+        elif order:
+            await db.orders.update_one(
+                {"order_id": order["order_id"]},
+                {"$set": {"payment_status": "refunded"}},
+            )
+        if order:
             await _create_notification(
                 db,
                 user_id=order["buyer_id"],

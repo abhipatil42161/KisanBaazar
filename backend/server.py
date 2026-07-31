@@ -15,7 +15,7 @@ import bcrypt
 import jwt as pyjwt
 import httpx
 from pathlib import Path
-from pydantic import BaseModel, EmailStr, ConfigDict, field_validator
+from pydantic import BaseModel, EmailStr, ConfigDict, field_validator, Field
 from typing import List, Optional, Literal
 from datetime import datetime, timezone, timedelta
 
@@ -414,6 +414,9 @@ class Product(BaseModel):
     pincode: Optional[str] = None
     weight_per_unit_kg: float = 1.0
     seller_delivery_charge: Optional[float] = None  # farmer-set flat fee; None = seller delivery not offered
+    total_stock: Optional[int] = None  # snapshot of available_qty at creation time, for admin reporting
+    sold_qty: int = 0
+    cancelled_qty: int = 0
     created_at: str
 
 
@@ -443,8 +446,8 @@ class ProductCreate(BaseModel):
 class OrderItem(BaseModel):
     product_id: str
     title: str
-    qty: int
-    price: float
+    qty: int = Field(gt=0, le=100_000)
+    price: float = Field(gt=0)
     image: Optional[str] = None
 
 
@@ -2212,6 +2215,9 @@ async def create_product(req: ProductCreate, user: User = Depends(get_current_us
         **req.model_dump(),
         "current_bid": req.price if req.auction else None,
         "active": True,
+        "total_stock": req.available_qty,
+        "sold_qty": 0,
+        "cancelled_qty": 0,
         "created_at": now_iso(),
     }
     await db.products.insert_one(doc)
@@ -2263,6 +2269,9 @@ async def update_product(pid: str, req: ProductUpdate, user: User = Depends(get_
     if prod["farmer_id"] != user.user_id and not is_admin_role(user.role):
         raise HTTPException(403, "Forbidden")
     updates = {k: v for k, v in req.model_dump(exclude_unset=True).items() if v is not None}
+    if "available_qty" in updates and updates["available_qty"] > prod.get("available_qty", 0):
+        # Restocking — grow the total_stock baseline by the added amount.
+        updates["total_stock"] = prod.get("total_stock", prod.get("available_qty", 0)) + (updates["available_qty"] - prod.get("available_qty", 0))
     # If images are replaced, cascade-delete removed Cloudinary assets
     if "images" in updates:
         old_ids = {
@@ -2383,6 +2392,41 @@ async def create_order(req: OrderCreate, user: User = Depends(get_current_user))
     pids = [it.product_id for it in req.items]
     prod_docs = await db.products.find({"product_id": {"$in": pids}}, {"_id": 0}).to_list(len(pids) or 1)
     prod_by_id = {p["product_id"]: p for p in prod_docs}
+
+    # --- Server-side product/price/stock validation ---
+    # The client only ever *suggests* product_id/qty/price; every one of
+    # those is re-verified here against the database so a manipulated
+    # request (fake product id, inflated quantity, tampered price) is
+    # rejected before any money moves or stock is touched.
+    for it in req.items:
+        product = prod_by_id.get(it.product_id)
+        if not product:
+            raise HTTPException(404, f"Product {it.product_id} is no longer available.")
+        if product.get("active") is False:
+            raise HTTPException(400, f"'{product['title']}' is no longer available for purchase.")
+        if not product.get("auction") and abs(it.price - product.get("price", it.price)) > 0.01:
+            raise HTTPException(409, f"Price for '{product['title']}' has changed. Please refresh your cart and try again.")
+        if it.qty > product.get("available_qty", 0):
+            raise HTTPException(409, f"Only {product.get('available_qty', 0)} {product.get('unit', 'units')} of '{product['title']}' available.")
+
+    # Atomically reserve stock for every item — race-safe against concurrent
+    # buyers, with automatic rollback if any single item can't be reserved
+    # (e.g. someone else bought the last of it a moment ago).
+    decremented: list = []
+    try:
+        for it in req.items:
+            result = await db.products.find_one_and_update(
+                {"product_id": it.product_id, "available_qty": {"$gte": it.qty}},
+                {"$inc": {"available_qty": -it.qty}},
+            )
+            if not result:
+                raise HTTPException(409, f"Only {prod_by_id[it.product_id].get('available_qty', 0)} {prod_by_id[it.product_id].get('unit', 'units')} of '{prod_by_id[it.product_id]['title']}' available.")
+            decremented.append((it.product_id, it.qty))
+    except HTTPException:
+        for pid, qty in decremented:
+            await db.products.update_one({"product_id": pid}, {"$inc": {"available_qty": qty}})
+        raise
+
     total_weight_kg = sum(
         it.qty * prod_by_id.get(it.product_id, {}).get("weight_per_unit_kg", 1.0) for it in req.items
     )
@@ -3369,6 +3413,36 @@ async def admin_force_logout(uid: str, request: Request, user: User = Depends(ge
 
 
 # ------------------ Admin: Products ------------------
+@api.get("/admin/stock-report")
+async def admin_stock_report(user: User = Depends(get_current_user)):
+    """Per-product stock breakdown: total, remaining, reserved (in
+    unpaid/pending orders — the closest real signal to 'in cart', since
+    the cart itself is client-side and not visible to the server), sold,
+    and cancelled."""
+    if not is_admin_role(user.role):
+        raise HTTPException(403, "Admin only")
+    products = await db.products.find({}, {"_id": 0}).to_list(2000)
+    reserved_agg = await db.orders.aggregate([
+        {"$match": {"payment_status": "pending", "status": {"$ne": "cancelled"}}},
+        {"$unwind": "$items"},
+        {"$group": {"_id": "$items.product_id", "reserved": {"$sum": "$items.qty"}}},
+    ]).to_list(2000)
+    reserved_by_pid = {r["_id"]: r["reserved"] for r in reserved_agg}
+    return [
+        {
+            "product_id": p["product_id"],
+            "title": p["title"],
+            "farmer_name": p.get("farmer_name"),
+            "total_stock": p.get("total_stock", p.get("available_qty", 0)),
+            "available_qty": p.get("available_qty", 0),
+            "reserved_qty": reserved_by_pid.get(p["product_id"], 0),
+            "sold_qty": p.get("sold_qty", 0),
+            "cancelled_qty": p.get("cancelled_qty", 0),
+        }
+        for p in products
+    ]
+
+
 @api.get("/admin/products")
 async def admin_list_products(
     q: Optional[str] = None,
@@ -3425,11 +3499,21 @@ async def admin_delete_product(pid: str, request: Request, user: User = Depends(
 async def admin_update_order(oid: str, req: AdminOrderUpdateReq, request: Request, user: User = Depends(get_current_user)):
     if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
-    result = await db.orders.update_one({"order_id": oid}, {"$set": {"status": req.status}})
-    if result.matched_count == 0:
+    existing = await db.orders.find_one({"order_id": oid}, {"_id": 0})
+    if not existing:
         raise HTTPException(404, "Order not found")
+    result = await db.orders.update_one({"order_id": oid}, {"$set": {"status": req.status}})
     doc = await db.orders.find_one({"order_id": oid}, {"_id": 0})
     await log_admin_activity(user, "order_status_updated", target_type="order", target_id=oid, detail=req.status, request=request)
+
+    # Restock (and record cancelled quantity) only on the transition INTO
+    # cancelled — guards against double-restocking if cancelled twice.
+    if req.status == "cancelled" and existing.get("status") != "cancelled":
+        for it in existing.get("items", []):
+            await db.products.update_one(
+                {"product_id": it["product_id"]},
+                {"$inc": {"available_qty": it["qty"], "sold_qty": -it["qty"], "cancelled_qty": it["qty"]}},
+            )
 
     buyer = await db.users.find_one({"user_id": doc["buyer_id"]}, {"_id": 0, "email": 1, "name": 1})
     if buyer:
