@@ -2178,10 +2178,10 @@ async def list_products(
         query["category"] = category
     if q:
         query["$or"] = [
-            {"title": {"$regex": q, "$options": "i"}},
-            {"description": {"$regex": q, "$options": "i"}},
-            {"farmer_name": {"$regex": q, "$options": "i"}},
-            {"location": {"$regex": q, "$options": "i"}},
+            {"title": {"$regex": re.escape(q), "$options": "i"}},
+            {"description": {"$regex": re.escape(q), "$options": "i"}},
+            {"farmer_name": {"$regex": re.escape(q), "$options": "i"}},
+            {"location": {"$regex": re.escape(q), "$options": "i"}},
         ]
     if state:
         query["state"] = state
@@ -2376,6 +2376,10 @@ async def create_order(req: OrderCreate, user: User = Depends(get_current_user))
         "[orders] REQUEST BODY user_id=%s items=%d delivery_method=%s payment_method=%s buyer_pincode=%s",
         user.user_id, len(req.items), req.delivery_method, req.payment_method, req.buyer_pincode,
     )
+    one_min_ago = datetime.now(timezone.utc) - timedelta(minutes=1)
+    recent_orders = await db.orders.count_documents({"buyer_id": user.user_id, "created_at": {"$gte": one_min_ago.isoformat()}})
+    if recent_orders >= 5:
+        raise HTTPException(429, "Too many orders placed too quickly. Please wait a moment and try again.")
     if not req.items:
         raise HTTPException(400, "Your cart is empty — add at least one item before checking out.")
     if any(it.qty <= 0 or it.price <= 0 for it in req.items):
@@ -3355,9 +3359,9 @@ async def admin_list_users(
         query["role"] = role
     if q:
         query["$or"] = [
-            {"name": {"$regex": q, "$options": "i"}},
-            {"email": {"$regex": q, "$options": "i"}},
-            {"phone": {"$regex": q, "$options": "i"}},
+            {"name": {"$regex": re.escape(q), "$options": "i"}},
+            {"email": {"$regex": re.escape(q), "$options": "i"}},
+            {"phone": {"$regex": re.escape(q), "$options": "i"}},
         ]
     docs = await db.users.find(query, {"_id": 0, "password": 0}).sort("created_at", -1).to_list(limit)
     return docs
@@ -3470,8 +3474,8 @@ async def admin_list_products(
         query["farmer_id"] = farmer_id
     if q:
         query["$or"] = [
-            {"title": {"$regex": q, "$options": "i"}},
-            {"farmer_name": {"$regex": q, "$options": "i"}},
+            {"title": {"$regex": re.escape(q), "$options": "i"}},
+            {"farmer_name": {"$regex": re.escape(q), "$options": "i"}},
         ]
     # Admin view includes inactive/deactivated listings (unlike the public /products list).
     docs = await db.products.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
@@ -3824,6 +3828,13 @@ async def startup_indexes():
         await db.deliveries.create_index("delivery_id", unique=True)
         await db.deliveries.create_index("order_id")
         await db.deliveries.create_index("assigned_to")
+        await db.orders.create_index("order_id", unique=True)
+        await db.orders.create_index("buyer_id")
+        await db.orders.create_index([("buyer_id", 1), ("created_at", -1)])
+        await db.orders.create_index("razorpay_order_id")
+        await db.products.create_index("product_id", unique=True)
+        await db.products.create_index("farmer_id")
+        await db.products.create_index("category")
         await db.security_logs.create_index("created_at")
         await db.security_logs.create_index("event_type")
         await db.password_reset_requests.create_index("email")
