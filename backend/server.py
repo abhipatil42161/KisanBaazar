@@ -2393,17 +2393,25 @@ async def create_order(req: OrderCreate, user: User = Depends(get_current_user))
     prod_docs = await db.products.find({"product_id": {"$in": pids}}, {"_id": 0}).to_list(len(pids) or 1)
     prod_by_id = {p["product_id"]: p for p in prod_docs}
 
-    # --- Server-side product/price/stock validation ---
+    # --- Server-side product/price/stock/seller validation ---
     # The client only ever *suggests* product_id/qty/price; every one of
     # those is re-verified here against the database so a manipulated
     # request (fake product id, inflated quantity, tampered price) is
     # rejected before any money moves or stock is touched.
+    farmer_ids = list({p["farmer_id"] for p in prod_docs if p.get("farmer_id")})
+    farmers_by_id = {
+        f["user_id"]: f
+        for f in await db.users.find({"user_id": {"$in": farmer_ids}}, {"_id": 0, "user_id": 1, "banned": 1}).to_list(len(farmer_ids) or 1)
+    }
     for it in req.items:
         product = prod_by_id.get(it.product_id)
         if not product:
             raise HTTPException(404, f"Product {it.product_id} is no longer available.")
         if product.get("active") is False:
             raise HTTPException(400, f"'{product['title']}' is no longer available for purchase.")
+        seller = farmers_by_id.get(product.get("farmer_id"))
+        if not seller or seller.get("banned"):
+            raise HTTPException(400, f"The seller for '{product['title']}' is currently unavailable.")
         if not product.get("auction") and abs(it.price - product.get("price", it.price)) > 0.01:
             raise HTTPException(409, f"Price for '{product['title']}' has changed. Please refresh your cart and try again.")
         if it.qty > product.get("available_qty", 0):
@@ -2433,6 +2441,8 @@ async def create_order(req: OrderCreate, user: User = Depends(get_current_user))
     primary_product = prod_by_id.get(req.items[0].product_id, {}) if req.items else {}
     farmer_pincode = primary_product.get("pincode")
     seller_charge = primary_product.get("seller_delivery_charge")
+    if req.delivery_method == "seller_delivery" and seller_charge is None:
+        raise HTTPException(400, "This seller hasn't enabled self-delivery for this product. Please choose another delivery method.")
 
     delivery_charge, delivery_meta = calculate_delivery_charge(
         req.delivery_method, total_weight_kg,
