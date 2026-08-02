@@ -2172,7 +2172,10 @@ async def list_products(
     export_ready: Optional[bool] = None,
     auction: Optional[bool] = None,
     limit: int = 60,
+    skip: int = 0,
 ):
+    limit = max(1, min(limit, 100))
+    skip = max(0, skip)
     query = {"active": {"$ne": False}}
     if category:
         query["category"] = category
@@ -2191,7 +2194,7 @@ async def list_products(
         query["export_ready"] = True
     if auction:
         query["auction"] = True
-    docs = await db.products.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    docs = await db.products.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).to_list(limit)
     return docs
 
 
@@ -3467,6 +3470,7 @@ async def admin_list_products(
 ):
     if not is_admin_role(user.role):
         raise HTTPException(403, "Admin only")
+    limit = max(1, min(limit, 1000))
     query: dict = {}
     if category:
         query["category"] = category

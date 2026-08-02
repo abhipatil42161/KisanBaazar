@@ -61,7 +61,7 @@ def signature_payload(folder: str | None = None, user_id: str | None = None) -> 
     if not API_SECRET:
         raise RuntimeError("Cloudinary not configured")
     timestamp = int(time.time())
-    params_to_sign = {"timestamp": timestamp, "folder": base}
+    params_to_sign = {"timestamp": timestamp, "folder": base, "allowed_formats": ",".join(ALLOWED_FORMATS)}
     signature = cloudinary.utils.api_sign_request(params_to_sign, API_SECRET)
     return {
         "signature": signature,
@@ -69,8 +69,8 @@ def signature_payload(folder: str | None = None, user_id: str | None = None) -> 
         "cloud_name": CLOUD_NAME,
         "api_key": API_KEY,
         "folder": base,
+        "allowed_formats": ",".join(ALLOWED_FORMATS),
         "max_bytes": MAX_BYTES,
-        "allowed_formats": list(ALLOWED_FORMATS),
     }
 
 
