@@ -444,11 +444,23 @@ class ProductCreate(BaseModel):
 
 
 class OrderItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     product_id: str
     title: str
     qty: int = Field(gt=0, le=100_000)
     price: float = Field(gt=0)
     image: Optional[str] = None
+
+    @field_validator("image", mode="before")
+    @classmethod
+    def _coerce_image(cls, v):
+        """Accept only a plain string URL. Anything else (null, an object
+        like {secure_url, public_id}, an array, an empty string) becomes
+        None here rather than failing validation — the placeholder is
+        applied at render time on whichever page displays the order."""
+        if isinstance(v, str) and v.strip():
+            return v
+        return None
 
 
 class OrderCreate(BaseModel):
