@@ -123,6 +123,56 @@ async def finalise_paid_order(
             if pid and qty > 0:
                 await db.products.update_one({"product_id": pid}, {"$inc": {"sold_qty": qty}})
 
+        # 4) Flip the linked delivery to actionable now that payment has
+        #    actually cleared, auto-assign it if that setting is on, and
+        #    notify the right delivery partner(s) — this is the moment the
+        #    order should "instantly appear" in a delivery dashboard.
+        delivery = await db.deliveries.find_one({"order_id": oid}, {"_id": 0})
+        if delivery:
+            await db.deliveries.update_one({"delivery_id": delivery["delivery_id"]}, {"$set": {"ready_for_delivery": True}})
+            settings_doc = await db.settings.find_one({"settings_id": "site_settings"}, {"_id": 0, "auto_assign_delivery": 1})
+            auto_assign = bool(settings_doc and settings_doc.get("auto_assign_delivery"))
+            if delivery["method"] == "local_delivery" and auto_assign and not delivery.get("assigned_to"):
+                # Pick the delivery partner with the fewest currently-active assignments.
+                partners = await db.users.find({"role": "delivery_partner", "banned": {"$ne": True}}, {"_id": 0, "user_id": 1, "name": 1}).to_list(200)
+                if partners:
+                    loads = []
+                    for p in partners:
+                        active = await db.deliveries.count_documents({"assigned_to": p["user_id"], "status": {"$in": ["assigned", "picked_up", "in_transit", "out_for_delivery"]}})
+                        loads.append((active, p))
+                    loads.sort(key=lambda x: x[0])
+                    chosen = loads[0][1]
+                    await db.deliveries.update_one(
+                        {"delivery_id": delivery["delivery_id"]},
+                        {"$set": {"assigned_to": chosen["user_id"], "status": "assigned"},
+                         "$push": {"tracking_history": {"status": "assigned", "at": _now_iso(), "note": "Auto-assigned"}}},
+                    )
+                    await _create_notification(
+                        db, user_id=chosen["user_id"], kind="delivery.assigned",
+                        title="New delivery assigned",
+                        body=f"Order {oid} has been assigned to you for local delivery.",
+                        link="/dashboard/delivery",
+                    )
+            elif delivery["method"] == "local_delivery" and not delivery.get("assigned_to"):
+                # Not auto-assigned — let every delivery partner know a new
+                # order is waiting in the unassigned queue.
+                partners = await db.users.find({"role": "delivery_partner", "banned": {"$ne": True}}, {"_id": 0, "user_id": 1}).to_list(200)
+                for p in partners:
+                    await _create_notification(
+                        db, user_id=p["user_id"], kind="delivery.available",
+                        title="New delivery available",
+                        body=f"Order {oid} is available for pickup in the delivery queue.",
+                        link="/dashboard/delivery",
+                    )
+            elif delivery.get("assigned_to"):
+                # Farmer chose Seller Self-Delivery, or it was pre-assigned — just let that partner know it's now live.
+                await _create_notification(
+                    db, user_id=delivery["assigned_to"], kind="delivery.ready",
+                    title="Order ready for delivery",
+                    body=f"Order {oid} is now paid and ready for delivery.",
+                    link="/dashboard/delivery",
+                )
+
     # 5) Notify buyer + every farmer whose product is in the cart.
     await _create_notification(
         db,

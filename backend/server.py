@@ -558,6 +558,7 @@ class AdminOrderUpdateReq(BaseModel):
 class AdminSettingsUpdateReq(BaseModel):
     platform_fee_percent: Optional[float] = None
     delivery_charge: Optional[float] = None
+    auto_assign_delivery: Optional[bool] = None
 
 
 class CategoryReq(BaseModel):
@@ -1188,6 +1189,7 @@ DEFAULT_SETTINGS = {
     "settings_id": SETTINGS_DOC_ID,
     "platform_fee_percent": 1.0,   # matches the previous hardcoded *1.01 behaviour
     "delivery_charge": 0.0,
+    "auto_assign_delivery": False,
 }
 
 
@@ -2484,9 +2486,13 @@ async def create_order(req: OrderCreate, user: User = Depends(get_current_user))
                     notes={"buyer_id": user.user_id, "method": req.payment_method},
                 )
                 rzp_id = rzp["id"]
-            except Exception:
-                logger.exception("Razorpay order creation failed; falling back to mock id")
-                rzp_id = f"order_mock_{uuid.uuid4().hex[:14]}"
+            except Exception as e:
+                # Roll back the stock we just reserved — no order should be
+                # left holding stock hostage if we can't even start payment.
+                for pid, qty in decremented:
+                    await db.products.update_one({"product_id": pid}, {"$inc": {"available_qty": qty}})
+                logger.exception("[orders] Razorpay order creation failed for user_id=%s", user.user_id)
+                raise HTTPException(502, f"Payment gateway is temporarily unavailable. Please try again in a moment. ({e})")
         else:
             rzp_id = f"order_mock_{uuid.uuid4().hex[:14]}"
 
@@ -2526,6 +2532,10 @@ async def create_order(req: OrderCreate, user: User = Depends(get_current_user))
         "meta": delivery_meta,
         "buyer_pincode": req.buyer_pincode,
         "farmer_pincode": farmer_pincode,
+        # Prepaid orders aren't actionable for delivery partners until
+        # payment actually clears (flipped in finalise_paid_order); COD has
+        # no separate payment-success moment, so it's ready immediately.
+        "ready_for_delivery": req.payment_method == "cod",
         "estimated_delivery_date": (datetime.now(timezone.utc) + timedelta(days=eta_days.get(req.delivery_method, 3))).date().isoformat(),
         "tracking_history": [{"status": "pending", "at": now_iso(), "note": "Order placed"}],
         "created_at": now_iso(),
@@ -2565,8 +2575,39 @@ def _delivery_access_ok(d: dict, user: User) -> bool:
 async def my_deliveries(user: User = Depends(get_current_user)):
     if user.role != "delivery_partner":
         raise HTTPException(403, "Delivery partners only")
-    docs = await db.deliveries.find({"assigned_to": user.user_id}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    docs = await db.deliveries.find(
+        {"assigned_to": user.user_id, "ready_for_delivery": True}, {"_id": 0}
+    ).sort("created_at", -1).to_list(200)
     return docs
+
+
+@api.get("/delivery/unassigned-queue")
+async def delivery_unassigned_queue(user: User = Depends(get_current_user)):
+    """Local-delivery orders that are paid/ready but not yet assigned to
+    anyone — visible to every delivery partner so nothing sits invisible
+    when auto-assignment is off (or has no partner to assign to)."""
+    if user.role != "delivery_partner":
+        raise HTTPException(403, "Delivery partners only")
+    docs = await db.deliveries.find(
+        {"method": "local_delivery", "assigned_to": None, "ready_for_delivery": True},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(200)
+    return docs
+
+
+@api.post("/delivery/{did}/claim")
+async def claim_delivery(did: str, user: User = Depends(get_current_user)):
+    """Let a delivery partner self-assign an unassigned queue item."""
+    if user.role != "delivery_partner":
+        raise HTTPException(403, "Delivery partners only")
+    result = await db.deliveries.update_one(
+        {"delivery_id": did, "assigned_to": None, "ready_for_delivery": True},
+        {"$set": {"assigned_to": user.user_id, "status": "assigned"},
+         "$push": {"tracking_history": {"status": "assigned", "at": now_iso(), "note": f"Claimed by {user.name}"}}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(409, "This delivery was already claimed by someone else.")
+    return await db.deliveries.find_one({"delivery_id": did}, {"_id": 0})
 
 
 @api.get("/delivery/order/{order_id}")
@@ -3844,6 +3885,7 @@ async def startup_indexes():
         await db.deliveries.create_index("delivery_id", unique=True)
         await db.deliveries.create_index("order_id")
         await db.deliveries.create_index("assigned_to")
+        await db.deliveries.create_index([("method", 1), ("assigned_to", 1), ("ready_for_delivery", 1)])
         await db.orders.create_index("order_id", unique=True)
         await db.orders.create_index("buyer_id")
         await db.orders.create_index([("buyer_id", 1), ("created_at", -1)])
